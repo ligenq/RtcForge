@@ -1,0 +1,709 @@
+using System.Buffers;
+using System.Collections.Concurrent;
+using RtcForge.Ice;
+using RtcForge.Sdp;
+using RtcForge.Dtls;
+using RtcForge.Rtp;
+using RtcForge.Media;
+
+namespace RtcForge;
+
+public enum SignalingState
+{
+    Stable,
+    HaveLocalOffer,
+    HaveRemoteOffer,
+    HaveLocalPranswer,
+    HaveRemotePranswer,
+    Closed
+}
+
+public enum PeerConnectionState
+{
+    New,
+    Connecting,
+    Connected,
+    Disconnected,
+    Failed,
+    Closed
+}
+
+public class RTCPeerConnection : IDisposable
+{
+    private const int DefaultSctpPort = 5000;
+    private const int DefaultMaxMessageSize = 262144;
+    private SignalingState _signalingState = SignalingState.Stable;
+    private PeerConnectionState _connectionState = PeerConnectionState.New;
+    private readonly IceAgent _iceAgent;
+    private readonly DtlsCertificate _dtlsCertificate;
+    private SdpMessage? _localDescription;
+    private SdpMessage? _remoteDescription;
+    private Sctp.SctpAssociation? _sctpAssociation;
+    private readonly List<RTCDataChannel> _dataChannels = new();
+    private readonly object _dataChannelLock = new();
+    private readonly List<RTCRtpTransceiver> _transceivers = new();
+    private DtlsTransport? _dtlsTransport;
+    private RTCDtlsTransport? _publicDtlsTransport;
+    private Srtp.SrtpSession? _srtpSession;
+    private readonly ConcurrentDictionary<byte, RTCRtpTransceiver> _remotePayloadTypeMap = new();
+    private string? _dataChannelMid;
+    private bool _dataChannelNegotiated;
+    private readonly Microsoft.Extensions.Logging.ILoggerFactory? _loggerFactory;
+
+    public SignalingState SignalingState => _signalingState;
+    public PeerConnectionState ConnectionState => _connectionState;
+    public IEnumerable<RTCRtpTransceiver> GetTransceivers() => _transceivers;
+
+    public event EventHandler<IceCandidate>? OnIceCandidate;
+    public event EventHandler<PeerConnectionState>? OnConnectionStateChange;
+    public event EventHandler<RTCDataChannel>? OnDataChannel;
+    public event EventHandler<RTCTrackEvent>? OnTrack;
+
+    public RTCPeerConnection(RTCConfiguration? configuration = null)
+    {
+        _loggerFactory = configuration?.LoggerFactory;
+        _iceAgent = new IceAgent(configuration?.LoggerFactory);
+        if (configuration?.IceServers != null)
+        {
+            _iceAgent.SetIceServers(configuration.IceServers);
+        }
+        if (configuration != null)
+        {
+            _iceAgent.SetTransportPolicy(configuration.IceTransportPolicy);
+        }
+        _iceAgent.OnLocalCandidate += (s, c) => OnIceCandidate?.Invoke(this, c);
+        _iceAgent.OnStateChange += HandleIceStateChange;
+        _iceAgent.OnDtlsPacket += (s, p) => _dtlsTransport?.HandleIncomingPacket(p.Span.ToArray());
+        _iceAgent.OnRtpPacket += HandleIncomingRtpPacket;
+        _iceAgent.OnRtcpPacket += HandleIncomingRtcpPacket;
+        _dtlsCertificate = DtlsCertificate.Generate();
+    }
+
+    private void HandleIncomingRtcpPacket(object? sender, UdpPacket packet)
+    {
+        var rtcpPackets = RtcpPacket.ParseCompound(packet.Span);
+        foreach (var rtcp in rtcpPackets)
+        {
+            if (rtcp is RtcpNackPacket nack)
+            {
+                var transceiver = _transceivers.FirstOrDefault(t => t.Sender.Transport != null);
+                if (transceiver != null)
+                {
+                    transceiver.Sender.HandleNackAsync(nack).FireAndForget();
+                }
+            }
+            else if (rtcp is RtcpPliPacket pli)
+            {
+                var transceiver = _transceivers.FirstOrDefault(t => t.Sender.Transport != null);
+                if (transceiver != null)
+                {
+                    transceiver.Sender.HandlePliAsync(pli).FireAndForget();
+                }
+            }
+            else if (rtcp is RtcpFirPacket fir)
+            {
+                var transceiver = _transceivers.FirstOrDefault(t => t.Sender.Transport != null);
+                if (transceiver != null)
+                {
+                    transceiver.Sender.HandlePliAsync(new RtcpPliPacket()).FireAndForget();
+                }
+            }
+        }
+    }
+
+    private async Task SendRtcpInternal(RtcpPacket packet)
+    {
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(1500);
+        try
+        {
+            int length = packet.Serialize(buffer);
+            if (length > 0)
+            {
+                await _iceAgent.SendDataAsync(buffer.AsSpan(0, length).ToArray());
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    private readonly HashSet<string> _announcedTracks = new();
+
+    private void HandleIncomingRtpPacket(object? sender, UdpPacket packet)
+    {
+        if (_srtpSession != null && _srtpSession.Unprotect(packet.Data, out var rtpPacket))
+        {
+            _remotePayloadTypeMap.TryGetValue(rtpPacket.PayloadType, out var transceiver);
+            if (transceiver != null)
+            {
+                if (!_announcedTracks.Contains(transceiver.Mid))
+                {
+                    _announcedTracks.Add(transceiver.Mid);
+                    OnTrack?.Invoke(this, new RTCTrackEvent(transceiver.Receiver, transceiver.Receiver.Track, transceiver));
+                }
+                transceiver.Receiver.HandleRtpPacketAsync(rtpPacket).FireAndForget();
+            }
+        }
+    }
+
+    private async Task SendRtpInternal(RtpPacket packet)
+    {
+        if (_srtpSession != null)
+        {
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(1500);
+            try
+            {
+                if (_srtpSession.Protect(packet, buffer, out int length))
+                {
+                    await _iceAgent.SendDataAsync(buffer.AsSpan(0, length).ToArray());
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
+    }
+
+    public RTCRtpSender AddTrack(MediaStreamTrack track)
+    {
+        var transceiver = _transceivers.FirstOrDefault(t => t.Sender.Track == null && t.Receiver.Track.Kind == track.Kind);
+        if (transceiver != null)
+        {
+            transceiver.Sender.ReplaceTrack(track);
+            return transceiver.Sender;
+        }
+
+        var sender = new RTCRtpSender(track, SendRtpInternal);
+        var receiverTrack = track.Kind == "audio" ? (MediaStreamTrack)new AudioStreamTrack() : new VideoStreamTrack();
+        var receiver = new RTCRtpReceiver(receiverTrack, SendRtcpInternal);
+        
+        if (_publicDtlsTransport != null)
+        {
+            sender.Transport = _publicDtlsTransport;
+            receiver.Transport = _publicDtlsTransport;
+        }
+
+        transceiver = new RTCRtpTransceiver(sender, receiver)
+        {
+            Mid = (_transceivers.Count).ToString(),
+            Direction = RTCRtpTransceiverDirection.SendRecv
+        };
+        _transceivers.Add(transceiver);
+        return sender;
+    }
+
+    public RTCDataChannel CreateDataChannel(string label)
+    {
+        RTCDataChannel dc;
+        lock (_dataChannelLock)
+        {
+            ushort id = (ushort)(_dataChannels.Count + 1);
+            dc = new RTCDataChannel(label, id, _sctpAssociation);
+            _dataChannels.Add(dc);
+        }
+        _sctpAssociation?.RegisterDataChannel(dc);
+
+        if (_sctpAssociation?.State == Sctp.SctpAssociationState.Established)
+        {
+            _sctpAssociation.SendDataAsync(dc.Id, 50, new Sctp.DcepMessage { Type = Sctp.DcepMessageType.DataChannelOpen, Label = label }.Serialize()).FireAndForget();
+        }
+
+        return dc;
+    }
+
+    private async Task InitializeDtlsAsync(bool isClient)
+    {
+        _dtlsTransport = new DtlsTransport(_iceAgent.SendDataAsync, _dtlsCertificate, _loggerFactory);
+        var publicTransport = new RTCDtlsTransport(_dtlsTransport, new RTCIceTransport());
+        _publicDtlsTransport = publicTransport;
+        
+        foreach (var transceiver in _transceivers)
+        {
+            transceiver.Sender.Transport = publicTransport;
+            transceiver.Receiver.Transport = publicTransport;
+        }
+
+        _dtlsTransport.OnData += (s, data) => HandleIncomingDtlsApplicationDataAsync(data);
+
+        var fingerprintAttr = _remoteDescription?.Attributes.FirstOrDefault(a => a.Name == "fingerprint")?.Value;
+        fingerprintAttr ??= _remoteDescription?.MediaDescriptions
+            .SelectMany(md => md.Attributes)
+            .FirstOrDefault(a => a.Name == "fingerprint")
+            ?.Value;
+        if (fingerprintAttr != null)
+        {
+            var parts = fingerprintAttr.Split(' ', 2);
+            if (parts.Length == 2)
+            {
+                _dtlsTransport.SetRemoteFingerprint(parts[0], parts[1]);
+            }
+        }
+
+        _dtlsTransport.OnStateChange += async (s, state) =>
+        {
+            if (state == DtlsState.Connected)
+            {
+                var keys = _dtlsTransport.GetSrtpKeys();
+                if (keys != null)
+                {
+                    _srtpSession = new Srtp.SrtpSession(keys, isClient);
+                }
+
+                if (ShouldNegotiateDataChannels())
+                {
+                    await InitializeSctpAsync(isClient);
+                }
+            }
+        };
+        await _dtlsTransport.StartAsync(isClient);
+    }
+
+    private Task HandleIncomingDtlsApplicationDataAsync(byte[] data)
+    {
+        return _sctpAssociation?.HandlePacketAsync(data) ?? Task.CompletedTask;
+    }
+
+    private async Task InitializeSctpAsync(bool isClient)
+    {
+        _sctpAssociation = new Sctp.SctpAssociation(DefaultSctpPort, DefaultSctpPort, async (data) => {
+            if (_dtlsTransport != null)
+            {
+                await _dtlsTransport.SendAsync(data);
+            }
+        }, _loggerFactory);
+
+        _sctpAssociation.OnRemoteDataChannel += (s, dc) =>
+        {
+            lock (_dataChannelLock) { _dataChannels.Add(dc); }
+            OnDataChannel?.Invoke(this, dc);
+        };
+
+        _sctpAssociation.OnEstablished += (s, e) =>
+        {
+            if (isClient)
+            {
+                List<RTCDataChannel> snapshot;
+                lock (_dataChannelLock) { snapshot = _dataChannels.ToList(); }
+                foreach (var dc in snapshot)
+                {
+                    dc.SetAssociation(_sctpAssociation!);
+                    _sctpAssociation!.RegisterDataChannel(dc);
+                    _sctpAssociation!.SendDataAsync(dc.Id, 50, new Sctp.DcepMessage { Type = Sctp.DcepMessageType.DataChannelOpen, Label = dc.Label }.Serialize()).FireAndForget();
+                }
+            }
+        };
+
+        await _sctpAssociation.StartAsync(isClient);
+    }
+
+    public async Task<SdpMessage> CreateOfferAsync()
+    {
+        await _iceAgent.StartGatheringAsync();
+        var offer = new SdpMessage { SessionName = "RtcForge Session" };
+
+        EnsureDefaultAudioTrackForEmptyOffer();
+        EnsureDataChannelMidIfNeeded();
+
+        var bundleMids = GetBundleMids();
+        if (bundleMids.Count > 0)
+        {
+            offer.Attributes.Add(new SdpAttribute { Name = "group", Value = $"BUNDLE {string.Join(" ", bundleMids)}" });
+        }
+
+        offer.Attributes.Add(new SdpAttribute { Name = "ice-options", Value = "trickle" });
+        offer.Attributes.Add(new SdpAttribute { Name = "msid-semantic", Value = "WMS *" });
+        offer.Attributes.Add(new SdpAttribute { Name = "fingerprint", Value = $"sha-256 {_dtlsCertificate.Fingerprint}" });
+        offer.Attributes.Add(new SdpAttribute { Name = "setup", Value = "actpass" });
+        offer.Attributes.Add(new SdpAttribute { Name = "ice-ufrag", Value = _iceAgent.LocalUfrag });
+        offer.Attributes.Add(new SdpAttribute { Name = "ice-pwd", Value = _iceAgent.LocalPassword });
+
+        foreach (var transceiver in _transceivers)
+        {
+            offer.MediaDescriptions.Add(CreateMediaDescription(transceiver, transceiver.Direction));
+        }
+
+        if (ShouldNegotiateDataChannels())
+        {
+            offer.MediaDescriptions.Add(CreateDataChannelMediaDescription());
+        }
+        return offer;
+    }
+
+    public async Task<SdpMessage> CreateAnswerAsync()
+    {
+        _iceAgent.StartGatheringAsync().FireAndForget();
+        var answer = new SdpMessage { SessionName = "RtcForge Session" };
+
+        var bundleMids = GetBundleMids();
+        if (bundleMids.Count > 0)
+        {
+            answer.Attributes.Add(new SdpAttribute { Name = "group", Value = $"BUNDLE {string.Join(" ", bundleMids)}" });
+        }
+
+        answer.Attributes.Add(new SdpAttribute { Name = "ice-options", Value = "trickle" });
+        answer.Attributes.Add(new SdpAttribute { Name = "msid-semantic", Value = "WMS *" });
+        answer.Attributes.Add(new SdpAttribute { Name = "fingerprint", Value = $"sha-256 {_dtlsCertificate.Fingerprint}" });
+
+        var remoteSetup = GetAttributeValue(_remoteDescription, "setup");
+        answer.Attributes.Add(new SdpAttribute { Name = "setup", Value = remoteSetup == "actpass" ? "passive" : "active" });
+
+        answer.Attributes.Add(new SdpAttribute { Name = "ice-ufrag", Value = _iceAgent.LocalUfrag });
+        answer.Attributes.Add(new SdpAttribute { Name = "ice-pwd", Value = _iceAgent.LocalPassword });
+
+        foreach (var transceiver in _transceivers)
+        {
+            var direction = ResolveAnswerDirection(transceiver);
+            answer.MediaDescriptions.Add(CreateMediaDescription(transceiver, direction));
+        }
+
+        if (_dataChannelNegotiated)
+        {
+            answer.MediaDescriptions.Add(CreateDataChannelMediaDescription());
+        }
+
+        return answer;
+    }
+
+    public Task SetLocalDescriptionAsync(SdpMessage description)
+    {
+        _localDescription = description;
+
+        if (_remoteDescription == null)
+        {
+            _signalingState = SignalingState.HaveLocalOffer;
+            _iceAgent.IsControlling = true;
+        }
+        else
+        {
+            _signalingState = SignalingState.Stable;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task SetRemoteDescriptionAsync(SdpMessage description)
+    {
+        _remoteDescription = description;
+
+        if (_localDescription == null)
+        {
+            _signalingState = SignalingState.HaveRemoteOffer;
+            _iceAgent.IsControlling = false;
+        }
+        else
+        {
+            _signalingState = SignalingState.Stable;
+        }
+
+        var ufrag = GetAttributeValue(description, "ice-ufrag");
+        var pwd = GetAttributeValue(description, "ice-pwd");
+        if (ufrag != null && pwd != null)
+        {
+            _iceAgent.SetRemoteCredentials(ufrag, pwd);
+        }
+
+        foreach (var attr in description.Attributes.Where(a => a.Name == "candidate"))
+        {
+            _iceAgent.AddRemoteCandidate(IceCandidate.Parse(attr.Value!));
+        }
+
+        foreach (var md in description.MediaDescriptions)
+        {
+            if (md.Media == "application")
+            {
+                EnsureDataChannelForRemoteMedia(md);
+            }
+            else
+            {
+                EnsureTransceiverForRemoteMedia(md);
+            }
+            foreach (var attr in md.Attributes.Where(a => a.Name == "candidate"))
+            {
+                _iceAgent.AddRemoteCandidate(IceCandidate.Parse(attr.Value!));
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public void AddIceCandidate(IceCandidate candidate) => _iceAgent.AddRemoteCandidate(candidate);
+    public async Task<bool> ConnectAsync() => await _iceAgent.ConnectAsync();
+
+    private void HandleIceStateChange(object? sender, IceState state)
+    {
+        switch (state)
+        {
+            case IceState.Checking: _connectionState = PeerConnectionState.Connecting; break;
+            case IceState.Connected:
+            case IceState.Completed:
+                _connectionState = PeerConnectionState.Connected;
+                bool isClient = ResolveDtlsClientRole();
+                InitializeDtlsAsync(isClient).FireAndForget();
+                break;
+            case IceState.Failed: _connectionState = PeerConnectionState.Failed; break;
+            case IceState.Closed: _connectionState = PeerConnectionState.Closed; break;
+        }
+        OnConnectionStateChange?.Invoke(this, _connectionState);
+    }
+
+    public void Dispose()
+    {
+        _iceAgent.Dispose();
+        _dtlsTransport?.Dispose();
+        _sctpAssociation?.Dispose();
+        lock (_dataChannelLock)
+        {
+            foreach (var channel in _dataChannels)
+            {
+                channel.SetClosed();
+            }
+        }
+        _connectionState = PeerConnectionState.Closed;
+    }
+
+    internal bool ResolveDtlsClientRole()
+    {
+        return GetSetupRole(_localDescription) switch
+        {
+            "active" => true,
+            "passive" => false,
+            _ => GetSetupRole(_remoteDescription) switch
+            {
+                "active" => false,
+                "passive" => true,
+                _ => !_iceAgent.IsControlling
+            }
+        };
+    }
+
+    private void EnsureTransceiverForRemoteMedia(SdpMediaDescription md)
+    {
+        if (md.Media != "audio" && md.Media != "video")
+        {
+            return;
+        }
+
+        string mid = md.Attributes.FirstOrDefault(a => a.Name == "mid")?.Value ?? _transceivers.Count.ToString();
+        var transceiver = _transceivers.FirstOrDefault(t => t.Mid == mid);
+        if (transceiver == null)
+        {
+            var receiverTrack = md.Media == "audio" ? (MediaStreamTrack)new AudioStreamTrack() : new VideoStreamTrack();
+            var sender = new RTCRtpSender(null, SendRtpInternal);
+            var receiver = new RTCRtpReceiver(receiverTrack, SendRtcpInternal);
+            transceiver = new RTCRtpTransceiver(sender, receiver)
+            {
+                Mid = mid
+            };
+            _transceivers.Add(transceiver);
+        }
+
+        transceiver.RemoteDirection = md.Port == 0
+            ? RTCRtpTransceiverDirection.Inactive
+            : ParseDirection(md.Attributes);
+        RegisterRemotePayloadTypes(md, transceiver);
+        NegotiateCodecsFromRemote(md, transceiver);
+    }
+
+    private static void NegotiateCodecsFromRemote(SdpMediaDescription md, RTCRtpTransceiver transceiver)
+    {
+        transceiver.NegotiatedCodecs.Clear();
+        foreach (var attr in md.Attributes.Where(a => a.Name == "rtpmap" && a.Value != null))
+        {
+            // Format: "PT codec/clockRate" or "PT codec/clockRate/channels"
+            var parts = attr.Value!.Split(' ', 2);
+            if (parts.Length != 2 || !byte.TryParse(parts[0], out var pt))
+            {
+                continue;
+            }
+            var codecParts = parts[1].Split('/');
+            if (codecParts.Length < 2 || !int.TryParse(codecParts[1], out var clockRate))
+            {
+                continue;
+            }
+            int? channels = codecParts.Length >= 3 && int.TryParse(codecParts[2], out var ch) ? ch : null;
+            transceiver.NegotiatedCodecs.Add(new NegotiatedCodec(pt, codecParts[0], clockRate, channels));
+        }
+    }
+
+    private void EnsureDataChannelForRemoteMedia(SdpMediaDescription md)
+    {
+        _dataChannelNegotiated = true;
+        _dataChannelMid = md.Attributes.FirstOrDefault(a => a.Name == "mid")?.Value ?? _dataChannelMid ?? _transceivers.Count.ToString();
+    }
+
+    private RTCRtpTransceiverDirection ResolveAnswerDirection(RTCRtpTransceiver transceiver)
+    {
+        bool canSend = transceiver.Sender.Track != null && transceiver.Direction != RTCRtpTransceiverDirection.Inactive;
+        var offeredDirection = transceiver.RemoteDirection ?? RTCRtpTransceiverDirection.SendRecv;
+
+        return offeredDirection switch
+        {
+            RTCRtpTransceiverDirection.SendOnly => RTCRtpTransceiverDirection.RecvOnly,
+            RTCRtpTransceiverDirection.RecvOnly => canSend ? RTCRtpTransceiverDirection.SendOnly : RTCRtpTransceiverDirection.Inactive,
+            RTCRtpTransceiverDirection.Inactive => RTCRtpTransceiverDirection.Inactive,
+            _ => canSend ? RTCRtpTransceiverDirection.SendRecv : RTCRtpTransceiverDirection.RecvOnly
+        };
+    }
+
+    private static RTCRtpTransceiverDirection ParseDirection(IEnumerable<SdpAttribute> attributes)
+    {
+        foreach (var attr in attributes)
+        {
+            switch (attr.Name)
+            {
+                case "sendrecv": return RTCRtpTransceiverDirection.SendRecv;
+                case "sendonly": return RTCRtpTransceiverDirection.SendOnly;
+                case "recvonly": return RTCRtpTransceiverDirection.RecvOnly;
+                case "inactive": return RTCRtpTransceiverDirection.Inactive;
+            }
+        }
+
+        return RTCRtpTransceiverDirection.SendRecv;
+    }
+
+    private static string? GetSetupRole(SdpMessage? description)
+    {
+        if (description == null)
+        {
+            return null;
+        }
+
+        return GetAttributeValue(description, "setup");
+    }
+
+    private void EnsureDefaultAudioTrackForEmptyOffer()
+    {
+        if (_transceivers.Count == 0 && !ShouldNegotiateDataChannels())
+        {
+            AddTrack(new AudioStreamTrack());
+        }
+    }
+
+    private void EnsureDataChannelMidIfNeeded()
+    {
+        if (ShouldNegotiateDataChannels() && string.IsNullOrEmpty(_dataChannelMid))
+        {
+            _dataChannelMid = _transceivers.Count.ToString();
+            _dataChannelNegotiated = true;
+        }
+    }
+
+    private bool ShouldNegotiateDataChannels()
+    {
+        return _dataChannels.Count > 0 || _dataChannelNegotiated;
+    }
+
+    private List<string> GetBundleMids()
+    {
+        var mids = _transceivers.Select(t => t.Mid).ToList();
+        if (ShouldNegotiateDataChannels())
+        {
+            mids.Add(_dataChannelMid!);
+        }
+
+        return mids;
+    }
+
+    private SdpMediaDescription CreateMediaDescription(RTCRtpTransceiver transceiver, RTCRtpTransceiverDirection direction)
+    {
+        var md = new SdpMediaDescription
+        {
+            Media = transceiver.Receiver.Track.Kind,
+            Port = 9,
+            Proto = "UDP/TLS/RTP/SAVPF",
+            Connection = "IN IP4 0.0.0.0"
+        };
+        md.Attributes.Add(new SdpAttribute { Name = "mid", Value = transceiver.Mid });
+        md.Attributes.Add(new SdpAttribute { Name = direction.ToString().ToLowerInvariant() });
+        md.Attributes.Add(new SdpAttribute { Name = "rtcp-mux" });
+        md.Attributes.Add(new SdpAttribute { Name = "rtcp-rsize" });
+
+        if (transceiver.NegotiatedCodecs.Count > 0)
+        {
+            foreach (var codec in transceiver.NegotiatedCodecs)
+            {
+                md.Formats.Add(codec.PayloadType.ToString());
+                string rtpmap = codec.Channels.HasValue
+                    ? $"{codec.PayloadType} {codec.Name}/{codec.ClockRate}/{codec.Channels}"
+                    : $"{codec.PayloadType} {codec.Name}/{codec.ClockRate}";
+                md.Attributes.Add(new SdpAttribute { Name = "rtpmap", Value = rtpmap });
+            }
+        }
+        else if (transceiver.Receiver.Track.Kind == "audio")
+        {
+            md.Formats.Add("111");
+            md.Attributes.Add(new SdpAttribute { Name = "rtpmap", Value = "111 opus/48000/2" });
+            md.Attributes.Add(new SdpAttribute { Name = "fmtp", Value = "111 minptime=10;useinbandfec=1" });
+        }
+        else
+        {
+            md.Formats.Add("96");
+            md.Attributes.Add(new SdpAttribute { Name = "rtpmap", Value = "96 VP8/90000" });
+            md.Attributes.Add(new SdpAttribute { Name = "rtcp-fb", Value = "96 nack" });
+            md.Attributes.Add(new SdpAttribute { Name = "rtcp-fb", Value = "96 nack pli" });
+        }
+
+        AppendLocalIceAttributes(md);
+        return md;
+    }
+
+    private SdpMediaDescription CreateDataChannelMediaDescription()
+    {
+        var md = new SdpMediaDescription
+        {
+            Media = "application",
+            Port = 9,
+            Proto = "UDP/DTLS/SCTP",
+            Connection = "IN IP4 0.0.0.0",
+            Formats = new List<string> { "webrtc-datachannel" },
+            Attributes = new List<SdpAttribute>
+            {
+                new() { Name = "mid", Value = _dataChannelMid! },
+                new() { Name = "sctp-port", Value = DefaultSctpPort.ToString() },
+                new() { Name = "max-message-size", Value = DefaultMaxMessageSize.ToString() }
+            }
+        };
+        AppendLocalIceAttributes(md);
+        return md;
+    }
+
+    private void RegisterRemotePayloadTypes(SdpMediaDescription md, RTCRtpTransceiver transceiver)
+    {
+        foreach (var format in md.Formats)
+        {
+            if (byte.TryParse(format, out var payloadType))
+            {
+                _remotePayloadTypeMap.AddOrUpdate(payloadType, transceiver, (_, _) => transceiver);
+            }
+        }
+    }
+
+    private static string? GetAttributeValue(SdpMessage? description, string attributeName)
+    {
+        if (description == null)
+        {
+            return null;
+        }
+
+        return description.Attributes.FirstOrDefault(a => a.Name == attributeName)?.Value
+            ?? description.MediaDescriptions
+                .SelectMany(md => md.Attributes)
+                .FirstOrDefault(a => a.Name == attributeName)
+                ?.Value;
+    }
+
+    private void AppendLocalIceAttributes(SdpMediaDescription mediaDescription)
+    {
+        foreach (var candidate in _iceAgent.LocalCandidates)
+        {
+            mediaDescription.Attributes.Add(new SdpAttribute { Name = "candidate", Value = candidate.ToString() });
+        }
+
+        if (_iceAgent.LocalCandidates.Count > 0)
+        {
+            mediaDescription.Attributes.Add(new SdpAttribute { Name = "end-of-candidates" });
+        }
+    }
+}

@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RtcForge Browser Harness</title>
+  <style>
+    :root {
+      --bg: #f5f0e8;
+      --panel: #fffdf8;
+      --ink: #1f1f1f;
+      --muted: #6c645c;
+      --accent: #0c6b58;
+      --accent-2: #d17a27;
+      --line: #dfd4c6;
+      --danger: #b33c2f;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Helvetica Neue", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(209,122,39,0.18), transparent 28%),
+        radial-gradient(circle at bottom right, rgba(12,107,88,0.16), transparent 30%),
+        linear-gradient(180deg, #f7f2eb, #efe5d8);
+      min-height: 100vh;
+    }
+    main {
+      width: min(980px, calc(100% - 32px));
+      margin: 32px auto;
+      display: grid;
+      gap: 16px;
+    }
+    .hero, .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: 0 18px 48px rgba(60, 45, 25, 0.08);
+    }
+    .hero {
+      padding: 28px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: clamp(2rem, 4vw, 3rem);
+      line-height: 1;
+      letter-spacing: -0.04em;
+    }
+    .hero p {
+      margin: 0;
+      color: var(--muted);
+      max-width: 62ch;
+    }
+    .controls {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 20px;
+    }
+    button, input {
+      font: inherit;
+    }
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 12px 18px;
+      background: var(--ink);
+      color: white;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: var(--accent);
+    }
+    button.warn {
+      background: var(--accent-2);
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 16px;
+    }
+    .panel {
+      padding: 18px;
+    }
+    h2 {
+      margin: 0 0 10px;
+      font-size: 1rem;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .status {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .status div {
+      padding: 12px;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      background: #fbf7f1;
+    }
+    .label {
+      display: block;
+      color: var(--muted);
+      font-size: 0.78rem;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .value {
+      font-weight: 600;
+    }
+    .log {
+      min-height: 320px;
+      max-height: 420px;
+      overflow: auto;
+      padding: 14px;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      background: #201b18;
+      color: #f1eadc;
+      font-family: Consolas, monospace;
+      font-size: 0.92rem;
+      white-space: pre-wrap;
+    }
+    .composer {
+      display: flex;
+      gap: 10px;
+      margin-top: 14px;
+    }
+    .composer input {
+      flex: 1;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      padding: 12px 14px;
+      background: #fff;
+    }
+    .foot {
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+    .error {
+      color: var(--danger);
+      font-weight: 600;
+    }
+    @media (max-width: 760px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <h1>RtcForge Browser Harness</h1>
+      <p>This page negotiates a browser <code>RTCPeerConnection</code> against the local <code>RtcForge</code> demo server. It is intended for manual interop testing once a browser is available.</p>
+      <div class="controls">
+        <button id="connect">Connect</button>
+        <button id="disconnect" class="warn" disabled>Reset</button>
+      </div>
+    </section>
+
+    <section class="grid">
+      <div class="panel">
+        <h2>Session</h2>
+        <div class="status">
+          <div>
+            <span class="label">Server State</span>
+            <span class="value" id="serverState">idle</span>
+          </div>
+          <div>
+            <span class="label">Browser ICE</span>
+            <span class="value" id="iceState">new</span>
+          </div>
+          <div>
+            <span class="label">Browser Connection</span>
+            <span class="value" id="pcState">new</span>
+          </div>
+          <div>
+            <span class="label">Data Channel</span>
+            <span class="value" id="dcState">closed</span>
+          </div>
+        </div>
+        <div class="composer">
+          <input id="message" type="text" placeholder="Send a message once the data channel opens">
+          <button id="send" class="secondary" disabled>Send</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Notes</h2>
+        <p class="foot">If this page reaches <code>connected</code>, you have real browser-to-<code>RtcForge</code> SDP, ICE, DTLS, SCTP, and data-channel interoperability on the current machine.</p>
+        <p class="foot">For TURN testing, configure TURN in the demo/server side and inspect whether the gathered candidates and selected pair use relay candidates.</p>
+        <p id="error" class="error"></p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Log</h2>
+      <div id="log" class="log"></div>
+    </section>
+  </main>
+
+  <script>
+    const logEl = document.getElementById("log");
+    const errorEl = document.getElementById("error");
+    const connectBtn = document.getElementById("connect");
+    const disconnectBtn = document.getElementById("disconnect");
+    const sendBtn = document.getElementById("send");
+    const messageInput = document.getElementById("message");
+    const serverStateEl = document.getElementById("serverState");
+    const iceStateEl = document.getElementById("iceState");
+    const pcStateEl = document.getElementById("pcState");
+    const dcStateEl = document.getElementById("dcState");
+
+    let pc = null;
+    let dc = null;
+    let sessionId = null;
+    let candidateCursor = 0;
+    let stateTimer = null;
+    let candidateTimer = null;
+
+    function log(message) {
+      logEl.textContent += `${new Date().toLocaleTimeString()} ${message}\n`;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function setError(message) {
+      errorEl.textContent = message || "";
+    }
+
+    function setButtons(connected) {
+      connectBtn.disabled = connected;
+      disconnectBtn.disabled = !connected;
+      sendBtn.disabled = !connected || !dc || dc.readyState !== "open";
+    }
+
+    function resetState() {
+      if (stateTimer) clearInterval(stateTimer);
+      if (candidateTimer) clearInterval(candidateTimer);
+      stateTimer = null;
+      candidateTimer = null;
+      candidateCursor = 0;
+      sessionId = null;
+      if (dc) {
+        try { dc.close(); } catch {}
+      }
+      if (pc) {
+        try { pc.close(); } catch {}
+      }
+      dc = null;
+      pc = null;
+      serverStateEl.textContent = "idle";
+      iceStateEl.textContent = "new";
+      pcStateEl.textContent = "new";
+      dcStateEl.textContent = "closed";
+      setButtons(false);
+    }
+
+    async function pollServerState() {
+      if (!sessionId) return;
+      const response = await fetch(`/api/session/${sessionId}/state`);
+      const payload = await response.json();
+      serverStateEl.textContent = payload.connectionState;
+    }
+
+    async function pollCandidates() {
+      if (!sessionId || !pc) return;
+      const response = await fetch(`/api/session/${sessionId}/candidates?since=${candidateCursor}`);
+      const payload = await response.json();
+      candidateCursor = payload.next;
+      for (const candidate of payload.items) {
+        log(`server candidate: ${candidate}`);
+        await pc.addIceCandidate({ candidate, sdpMid: "0" }).catch(error => {
+          log(`candidate add failed: ${error.message}`);
+        });
+      }
+    }
+
+    function wireDataChannel(channel) {
+      dc = channel;
+      dcStateEl.textContent = channel.readyState;
+      sendBtn.disabled = channel.readyState !== "open";
+      channel.onopen = () => {
+        log(`data channel '${channel.label}' opened`);
+        dcStateEl.textContent = channel.readyState;
+        sendBtn.disabled = false;
+      };
+      channel.onclose = () => {
+        log(`data channel '${channel.label}' closed`);
+        dcStateEl.textContent = channel.readyState;
+        sendBtn.disabled = true;
+      };
+      channel.onmessage = event => {
+        log(`server: ${event.data}`);
+      };
+    }
+
+    async function connect() {
+      setError("");
+      log("creating browser session");
+      setButtons(true);
+
+      pc = new RTCPeerConnection();
+      pc.oniceconnectionstatechange = () => {
+        iceStateEl.textContent = pc.iceConnectionState;
+      };
+      pc.onconnectionstatechange = () => {
+        pcStateEl.textContent = pc.connectionState;
+      };
+      pc.onicecandidate = async event => {
+        if (!event.candidate || !sessionId) return;
+        log(`browser candidate: ${event.candidate.candidate}`);
+        await fetch(`/api/session/${sessionId}/candidate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ candidate: event.candidate.candidate })
+        });
+      };
+      pc.ondatachannel = event => {
+        log(`received data channel '${event.channel.label}'`);
+        wireDataChannel(event.channel);
+      };
+
+      const sessionResponse = await fetch("/api/session", { method: "POST" });
+      const session = await sessionResponse.json();
+      sessionId = session.sessionId;
+      log(`session ${sessionId} created`);
+
+      await pc.setRemoteDescription({ type: "offer", sdp: session.offerSdp });
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+
+      await fetch(`/api/session/${sessionId}/answer`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sdp: answer.sdp })
+      });
+
+      await pollCandidates();
+      stateTimer = setInterval(() => pollServerState().catch(error => setError(error.message)), 1000);
+      candidateTimer = setInterval(() => pollCandidates().catch(error => setError(error.message)), 500);
+      log("browser answer applied");
+    }
+
+    connectBtn.addEventListener("click", () => {
+      connect().catch(error => {
+        setError(error.message);
+        log(`error: ${error.message}`);
+        resetState();
+      });
+    });
+
+    disconnectBtn.addEventListener("click", () => {
+      log("resetting local session");
+      resetState();
+    });
+
+    sendBtn.addEventListener("click", async () => {
+      const text = messageInput.value.trim();
+      if (!text || !dc || dc.readyState !== "open" || !sessionId) return;
+      dc.send(text);
+      log(`browser: ${text}`);
+      messageInput.value = "";
+    });
+
+    resetState();
+  </script>
+</body>
+</html>
