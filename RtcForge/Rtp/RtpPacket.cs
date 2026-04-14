@@ -99,7 +99,7 @@ public class RtpPacket
                 return false;
             }
 
-            byte paddingCount = buffer[buffer.Length - 1];
+            byte paddingCount = buffer[^1];
             if (paddingCount > payloadLength)
             {
                 return false;
@@ -145,7 +145,7 @@ public class RtpPacket
         {
             // Simple padding for now (just 1 byte at the end if padding is set, though padding should make it multiple of 4 usually)
             // For now, we'll assume the payload already includes any required padding if Padding is true, or we add 1 byte.
-            length += 1;
+            length++;
         }
         return length;
     }
@@ -187,7 +187,7 @@ public class RtpPacket
         {
             // Example: Add 1 byte of padding as requested by the bit
             buffer[offset] = 1;
-            offset += 1;
+            offset++;
         }
 
         return offset;

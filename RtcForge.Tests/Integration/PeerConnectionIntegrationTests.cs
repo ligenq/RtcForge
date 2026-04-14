@@ -164,7 +164,7 @@ public class PeerConnectionIntegrationTests
         using var pc = new RTCPeerConnection();
         var track = new AudioStreamTrack();
         var sender = pc.AddTrack(track);
-        
+
         // We need to simulate DTLS connection to set the Transport
         // But for now let's manually trigger the ICE state change or just use reflection to fire the event
         var iceAgent = (IceAgent)typeof(RTCPeerConnection)
@@ -179,10 +179,10 @@ public class PeerConnectionIntegrationTests
 
         // Accessing the internal sender to verify NACK was handled
         // In a real test we'd probably mock the transceiver or use a wrapper
-        
+
         // Let's just verify that it doesn't crash and the flow reaches the sender
         // We can use reflection to set a flag or just assume it works if we fix the Transport issue
-        
+
         // For this test to be effective, we MUST ensure Transport is set.
         // Let's simulate ICE Connected state
         var handleIceStateChange = typeof(RTCPeerConnection)
@@ -202,7 +202,7 @@ public class PeerConnectionIntegrationTests
         // Act
         var handleIncomingRtcpPacket = typeof(RTCPeerConnection)
             .GetMethod("HandleIncomingRtcpPacket", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        
+
         // This should not throw and should dispatch to sender
         handleIncomingRtcpPacket.Invoke(pc, [iceAgent, udpPacket]);
 

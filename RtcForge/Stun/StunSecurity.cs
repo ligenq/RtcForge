@@ -28,7 +28,7 @@ public static class StunSecurity
         try
         {
             Span<byte> buffer = rented.AsSpan(0, fingerprintValueOffset);
-            data.Slice(0, fingerprintValueOffset).CopyTo(buffer);
+            data[..fingerprintValueOffset].CopyTo(buffer);
             BinaryPrimitives.WriteUInt16BigEndian(buffer.Slice(2, 2), (ushort)(fingerprintHeaderOffset + 8 - StunMessage.HeaderLength));
 
             uint expectedCrc = BinaryPrimitives.ReadUInt32BigEndian(data.Slice(fingerprintValueOffset, 4));
@@ -53,7 +53,7 @@ public static class StunSecurity
         try
         {
             Span<byte> buffer = rented.AsSpan(0, integrityValueOffset);
-            data.Slice(0, integrityValueOffset).CopyTo(buffer);
+            data[..integrityValueOffset].CopyTo(buffer);
             BinaryPrimitives.WriteUInt16BigEndian(buffer.Slice(2, 2), (ushort)(integrityHeaderOffset + 24 - StunMessage.HeaderLength));
 
             byte[] actual = CalculateMessageIntegrity(buffer, key);

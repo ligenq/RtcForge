@@ -81,7 +81,7 @@ public class DcepMessageTests
     [Fact]
     public void Parse_EmptyBuffer_ReturnsNull()
     {
-        var result = DcepMessage.Parse(ReadOnlySpan<byte>.Empty);
+        var result = DcepMessage.Parse([]);
 
         // Current implementation returns null! for empty buffer
         Assert.Null(result);

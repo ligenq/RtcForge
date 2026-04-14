@@ -5,23 +5,23 @@ namespace RtcForge.Stun;
 public enum StunMessageType : ushort
 {
     BindingRequest = 0x0001,
-    BindingSuccessResponse = 0x0101,
-    BindingErrorResponse = 0x0111,
-    BindingIndication = 0x0011,
     AllocateRequest = 0x0003,
-    AllocateSuccessResponse = 0x0103,
-    AllocateErrorResponse = 0x0113,
     RefreshRequest = 0x0004,
-    RefreshSuccessResponse = 0x0104,
-    RefreshErrorResponse = 0x0114,
     CreatePermissionRequest = 0x0008,
-    CreatePermissionSuccessResponse = 0x0108,
-    CreatePermissionErrorResponse = 0x0118,
     ChannelBindRequest = 0x0009,
-    ChannelBindSuccessResponse = 0x0109,
-    ChannelBindErrorResponse = 0x0119,
+    BindingIndication = 0x0011,
     SendIndication = 0x0016,
-    DataIndication = 0x0017
+    DataIndication = 0x0017,
+    BindingSuccessResponse = 0x0101,
+    AllocateSuccessResponse = 0x0103,
+    RefreshSuccessResponse = 0x0104,
+    CreatePermissionSuccessResponse = 0x0108,
+    ChannelBindSuccessResponse = 0x0109,
+    BindingErrorResponse = 0x0111,
+    AllocateErrorResponse = 0x0113,
+    RefreshErrorResponse = 0x0114,
+    CreatePermissionErrorResponse = 0x0118,
+    ChannelBindErrorResponse = 0x0119
 }
 
 public enum StunAttributeType : ushort
@@ -32,19 +32,19 @@ public enum StunAttributeType : ushort
     ErrorCode = 0x0009,
     UnknownAttributes = 0x000A,
     ChannelNumber = 0x000C,
-    Realm = 0x0014,
-    Nonce = 0x0015,
-    XorMappedAddress = 0x0020,
-    Priority = 0x0024,
-    UseCandidate = 0x0025,
-    IceControlled = 0x8029,
-    IceControlling = 0x802A,
-    Fingerprint = 0x8028,
     Lifetime = 0x000D,
     XorPeerAddress = 0x0012,
     Data = 0x0013,
+    Realm = 0x0014,
+    Nonce = 0x0015,
     RelayedAddress = 0x0016,
-    RequestedTransport = 0x0019
+    RequestedTransport = 0x0019,
+    XorMappedAddress = 0x0020,
+    Priority = 0x0024,
+    UseCandidate = 0x0025,
+    Fingerprint = 0x8028,
+    IceControlled = 0x8029,
+    IceControlling = 0x802A
 }
 
 public class StunMessage
@@ -54,7 +54,7 @@ public class StunMessage
 
     public StunMessageType Type { get; set; }
     public byte[] TransactionId { get; set; } = new byte[12];
-    public List<StunAttribute> Attributes { get; set; } = new();
+    public List<StunAttribute> Attributes { get; set; } = [];
     public byte[]? RawBytes { get; private set; }
 
     public static bool TryParse(ReadOnlySpan<byte> buffer, out StunMessage message)
@@ -65,7 +65,7 @@ public class StunMessage
             return false;
         }
 
-        ushort type = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(0, 2));
+        ushort type = BinaryPrimitives.ReadUInt16BigEndian(buffer[..2]);
         if ((type & 0xC000) != 0)
         {
             return false; // First two bits must be 0
@@ -87,7 +87,7 @@ public class StunMessage
         {
             Type = (StunMessageType)type,
             TransactionId = buffer.Slice(8, 12).ToArray(),
-            RawBytes = buffer.Slice(0, HeaderLength + length).ToArray()
+            RawBytes = buffer[..(HeaderLength + length)].ToArray()
         };
 
         int offset = HeaderLength;
@@ -149,7 +149,7 @@ public class StunMessage
             return -1;
         }
 
-        BinaryPrimitives.WriteUInt16BigEndian(buffer.Slice(0, 2), (ushort)Type);
+        BinaryPrimitives.WriteUInt16BigEndian(buffer[..2], (ushort)Type);
         SetMessageLength(buffer, 0);
         BinaryPrimitives.WriteUInt32BigEndian(buffer.Slice(4, 4), MagicCookie);
         TransactionId.CopyTo(buffer.Slice(8, 12));
@@ -169,7 +169,7 @@ public class StunMessage
                 offset += 4;
                 // RFC 5389: set length as if MessageIntegrity were the last attribute
                 SetMessageLength(buffer, offset + 20);
-                byte[] hmac = StunSecurity.CalculateMessageIntegrity(buffer.Slice(0, offset), integrityKey);
+                byte[] hmac = StunSecurity.CalculateMessageIntegrity(buffer[..offset], integrityKey);
                 hmac.CopyTo(buffer.Slice(offset, 20));
                 offset += 20;
                 continue;
@@ -182,7 +182,7 @@ public class StunMessage
                 offset += 4;
                 // RFC 5389: set length as if Fingerprint were the last attribute
                 SetMessageLength(buffer, offset + 4);
-                uint crc = StunSecurity.CalculateFingerprint(buffer.Slice(0, offset));
+                uint crc = StunSecurity.CalculateFingerprint(buffer[..offset]);
                 BinaryPrimitives.WriteUInt32BigEndian(buffer.Slice(offset, 4), crc);
                 offset += 4;
                 continue;
@@ -214,7 +214,7 @@ public class StunMessage
 public class StunAttribute
 {
     public StunAttributeType Type { get; set; }
-    public byte[] Value { get; set; } = Array.Empty<byte>();
+    public byte[] Value { get; set; } = [];
 
     public System.Net.IPEndPoint? GetXorMappedAddress(byte[] transactionId)
     {
@@ -305,7 +305,7 @@ public class StunAttribute
         }
 
         int code = (Value[2] * 100) + Value[3];
-        string reason = System.Text.Encoding.UTF8.GetString(Value.AsSpan().Slice(4));
+        string reason = System.Text.Encoding.UTF8.GetString(Value.AsSpan()[4..]);
         return (code, reason);
     }
 

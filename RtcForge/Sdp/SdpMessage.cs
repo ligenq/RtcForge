@@ -4,13 +4,13 @@ namespace RtcForge.Sdp;
 
 public class SdpMessage
 {
-    public int Version { get; set; } = 0;
+    public int Version { get; set; }
     public SdpOrigin Origin { get; set; } = new();
     public string SessionName { get; set; } = "-";
     public string Connection { get; set; } = "IN IP4 0.0.0.0";
     public SdpTiming Timing { get; set; } = new();
-    public List<SdpAttribute> Attributes { get; set; } = new();
-    public List<SdpMediaDescription> MediaDescriptions { get; set; } = new();
+    public List<SdpAttribute> Attributes { get; set; } = [];
+    public List<SdpMediaDescription> MediaDescriptions { get; set; } = [];
 
     public override string ToString()
     {
@@ -45,7 +45,7 @@ public class SdpMessage
             }
 
             char type = line[0];
-            string value = line.Substring(2);
+            string value = line[2..];
 
             switch (type)
             {
@@ -169,8 +169,8 @@ public class SdpOrigin
 
 public class SdpTiming
 {
-    public ulong StartTime { get; set; } = 0;
-    public ulong StopTime { get; set; } = 0;
+    public ulong StartTime { get; set; }
+    public ulong StopTime { get; set; }
 
     public override string ToString() => $"{StartTime} {StopTime}";
 
@@ -221,8 +221,8 @@ public class SdpAttribute
 
         return new SdpAttribute
         {
-            Name = value.Substring(0, colonIndex),
-            Value = value.Substring(colonIndex + 1)
+            Name = value[..colonIndex],
+            Value = value[(colonIndex + 1)..]
         };
     }
 }
@@ -233,8 +233,8 @@ public class SdpMediaDescription
     public int Port { get; set; }
     public string Proto { get; set; } = "RTP/AVP";
     public string? Connection { get; set; }
-    public List<string> Formats { get; set; } = new();
-    public List<SdpAttribute> Attributes { get; set; } = new();
+    public List<string> Formats { get; set; } = [];
+    public List<SdpAttribute> Attributes { get; set; } = [];
 
     public override string ToString()
     {

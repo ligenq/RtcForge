@@ -14,8 +14,8 @@ public class SrtpCryptoContext
     private byte[]? _sessionSalt;
     private byte[]? _sessionAuthKey;
 
-    private uint _roc = 0;
-    private ushort _lastSeq = 0;
+    private uint _roc;
+    private ushort _lastSeq;
     private bool _firstPacket = true;
 
     public SrtpCryptoContext(byte[] masterKey, byte[] masterSalt)
@@ -60,7 +60,7 @@ public class SrtpCryptoContext
         BinaryPrimitives.WriteUInt32BigEndian(rocBytes, _roc);
 
         using var hmac = IncrementalHash.CreateHMAC(HashAlgorithmName.SHA1, _sessionAuthKey!);
-        hmac.AppendData(output.Slice(0, totalLenBeforeTag));
+        hmac.AppendData(output[..totalLenBeforeTag]);
         hmac.AppendData(rocBytes);
 
         Span<byte> fullHash = stackalloc byte[20];
@@ -69,7 +69,7 @@ public class SrtpCryptoContext
             return false;
         }
 
-        fullHash.Slice(0, 10).CopyTo(output.Slice(totalLenBeforeTag, 10));
+        fullHash[..10].CopyTo(output.Slice(totalLenBeforeTag, 10));
 
         length = totalLenBeforeTag + 10;
         return true;
@@ -84,7 +84,7 @@ public class SrtpCryptoContext
         }
 
         int totalLenBeforeTag = input.Length - 10;
-        var rawPacket = input.Slice(0, totalLenBeforeTag);
+        var rawPacket = input[..totalLenBeforeTag];
 
         // TryParse doesn't copy the payload if we use its Memory variant (though current impl does)
         if (!RtpPacket.TryParse(rawPacket, out packet))
@@ -106,7 +106,7 @@ public class SrtpCryptoContext
         hmac.TryGetHashAndReset(hash, out _);
         ReadOnlySpan<byte> actualTag = input.Span.Slice(totalLenBeforeTag, 10);
 
-        if (!hash.Slice(0, 10).SequenceEqual(actualTag))
+        if (!hash[..10].SequenceEqual(actualTag))
         {
             return false;
         }

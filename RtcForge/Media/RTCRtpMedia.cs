@@ -15,7 +15,7 @@ public class RTCRtpSender
     public MediaStreamTrack? Track { get; private set; }
     public RTCDtlsTransport? Transport { get; internal set; }
     private readonly Func<RtpPacket, Task> _sendRtpFunc;
-    private readonly Dictionary<ushort, RtpPacket> _packetHistory = new();
+    private readonly Dictionary<ushort, RtpPacket> _packetHistory = [];
     private readonly Lock _historyLock = new();
 
     public event EventHandler? OnPictureLoss;
@@ -76,7 +76,7 @@ public class RTCRtpReceiver
 {
     public MediaStreamTrack Track { get; }
     public RTCDtlsTransport? Transport { get; internal set; }
-    private ushort _lastSeq = 0;
+    private ushort _lastSeq;
     private bool _firstPacket = true;
     private readonly Func<RtcpPacket, Task> _sendRtcpFunc;
     private readonly RtpJitterBuffer _jitterBuffer = new();
@@ -136,7 +136,7 @@ public class RTCRtpTransceiver
     public RTCRtpTransceiverDirection Direction { get; set; } = RTCRtpTransceiverDirection.SendRecv;
     public RTCRtpTransceiverDirection? CurrentDirection { get; internal set; }
     internal RTCRtpTransceiverDirection? RemoteDirection { get; set; }
-    internal List<NegotiatedCodec> NegotiatedCodecs { get; set; } = new();
+    internal List<NegotiatedCodec> NegotiatedCodecs { get; set; } = [];
 
     internal RTCRtpTransceiver(RTCRtpSender sender, RTCRtpReceiver receiver)
     {

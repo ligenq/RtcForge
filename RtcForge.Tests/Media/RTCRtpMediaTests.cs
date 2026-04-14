@@ -32,7 +32,7 @@ public class RTCRtpMediaTests
         sentPackets.Clear();
 
         // NACK for seq 11
-        var nack = new RtcpNackPacket { MediaSsrc = 0, LostSequenceNumbers = new List<ushort> { 11 } };
+        var nack = new RtcpNackPacket { MediaSsrc = 0, LostSequenceNumbers = [11] };
         await sender.HandleNackAsync(nack);
 
         Assert.Single(sentPackets);
@@ -45,7 +45,7 @@ public class RTCRtpMediaTests
         var sentPackets = new List<RtpPacket>();
         var sender = new RTCRtpSender(new AudioStreamTrack(), p => { sentPackets.Add(p); return Task.CompletedTask; });
 
-        var nack = new RtcpNackPacket { MediaSsrc = 0, LostSequenceNumbers = new List<ushort> { 999 } };
+        var nack = new RtcpNackPacket { MediaSsrc = 0, LostSequenceNumbers = [999] };
         await sender.HandleNackAsync(nack);
 
         Assert.Empty(sentPackets);
@@ -102,12 +102,12 @@ public class RTCRtpMediaTests
         sentPackets.Clear();
 
         // Packet 0 should have been evicted
-        var nack = new RtcpNackPacket { LostSequenceNumbers = new List<ushort> { 0 } };
+        var nack = new RtcpNackPacket { LostSequenceNumbers = [0] };
         await sender.HandleNackAsync(nack);
         Assert.Empty(sentPackets);
 
         // Packet 100 should still be in history
-        nack = new RtcpNackPacket { LostSequenceNumbers = new List<ushort> { 100 } };
+        nack = new RtcpNackPacket { LostSequenceNumbers = [100] };
         await sender.HandleNackAsync(nack);
         Assert.Single(sentPackets);
     }

@@ -21,9 +21,9 @@ public partial class SctpAssociation : IDisposable
     private volatile SctpAssociationState _state = SctpAssociationState.Closed;
     private readonly ushort _sourcePort;
     private readonly ushort _destinationPort;
-    private uint _myVerificationTag;
+    private readonly uint _myVerificationTag;
     private uint _peerVerificationTag;
-    private uint _myInitialTsn;
+    private readonly uint _myInitialTsn;
     private uint _peerInitialTsn;
     private uint _myTsn;
     private uint _cumulativeTsnAckPoint;
@@ -35,7 +35,7 @@ public partial class SctpAssociation : IDisposable
     private readonly ConcurrentDictionary<ushort, RTCDataChannel> _dataChannels = new();
     private readonly ConcurrentDictionary<ushort, SctpStream> _streams = new();
     private readonly Lock _receiveLock = new();
-    private readonly SortedSet<uint> _receivedTsns = new();
+    private readonly SortedSet<uint> _receivedTsns = [];
     private readonly ConcurrentDictionary<ushort, ushort> _outboundSsns = new();
     private readonly CancellationTokenSource _cts = new();
     private readonly TimeProvider _timeProvider;
@@ -313,7 +313,7 @@ public partial class SctpAssociation : IDisposable
         await _sendFunc(buffer);
     }
 
-    private async Task HandleInit(SctpPacket packet, SctpInitChunk init)
+    private async Task HandleInit(SctpPacket _, SctpInitChunk init)
     {
         _peerVerificationTag = init.InitiateTag;
         _peerInitialTsn = init.InitialTsn;
@@ -322,7 +322,7 @@ public partial class SctpAssociation : IDisposable
         await SendChunkInternalAsync(response);
     }
 
-    private async Task HandleInitAck(SctpPacket packet, SctpInitChunk initAck)
+    private async Task HandleInitAck(SctpPacket _, SctpInitChunk initAck)
     {
         _peerVerificationTag = initAck.InitiateTag;
         _peerInitialTsn = initAck.InitialTsn;
@@ -333,7 +333,7 @@ public partial class SctpAssociation : IDisposable
 
     public event EventHandler? OnEstablished;
 
-    private async Task HandleCookieEcho(SctpPacket packet, SctpChunk chunk)
+    private async Task HandleCookieEcho(SctpPacket _, SctpChunk _1)
     {
         await SendChunkInternalAsync(new SctpSimpleChunk { Type = SctpChunkType.CookieAck, Length = 4 });
         _state = SctpAssociationState.Established;
@@ -350,5 +350,6 @@ public partial class SctpAssociation : IDisposable
             channel.SetClosed();
         }
         _cts.Dispose();
+        GC.SuppressFinalize(this);
     }
 }

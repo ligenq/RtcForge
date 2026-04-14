@@ -13,7 +13,7 @@ public class SctpPacket
     public ushort DestinationPort { get; set; }
     public uint VerificationTag { get; set; }
     public uint Checksum { get; set; } // CRC32c
-    public List<SctpChunk> Chunks { get; set; } = new();
+    public List<SctpChunk> Chunks { get; set; } = [];
 
     public static bool TryParse(ReadOnlySpan<byte> buffer, out SctpPacket packet)
     {
@@ -25,7 +25,7 @@ public class SctpPacket
 
         packet = new SctpPacket
         {
-            SourcePort = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(0, 2)),
+            SourcePort = BinaryPrimitives.ReadUInt16BigEndian(buffer[..2]),
             DestinationPort = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(2, 2)),
             VerificationTag = BinaryPrimitives.ReadUInt32BigEndian(buffer.Slice(4, 4)),
             Checksum = BinaryPrimitives.ReadUInt32BigEndian(buffer.Slice(8, 4))
@@ -39,7 +39,7 @@ public class SctpPacket
                 break;
             }
 
-            if (SctpChunk.TryParse(buffer.Slice(offset), out var chunk))
+            if (SctpChunk.TryParse(buffer[offset..], out var chunk))
             {
                 packet.Chunks.Add(chunk);
                 // Chunks are padded to 4 bytes
@@ -72,7 +72,7 @@ public class SctpPacket
             return -1;
         }
 
-        BinaryPrimitives.WriteUInt16BigEndian(buffer.Slice(0, 2), SourcePort);
+        BinaryPrimitives.WriteUInt16BigEndian(buffer[..2], SourcePort);
         BinaryPrimitives.WriteUInt16BigEndian(buffer.Slice(2, 2), DestinationPort);
         BinaryPrimitives.WriteUInt32BigEndian(buffer.Slice(4, 4), VerificationTag);
         BinaryPrimitives.WriteUInt32BigEndian(buffer.Slice(8, 4), 0); // Checksum placeholder
@@ -85,7 +85,7 @@ public class SctpPacket
                 break;
             }
 
-            int chunkLen = chunk.Serialize(buffer.Slice(offset));
+            int chunkLen = chunk.Serialize(buffer[offset..]);
             if (chunkLen < 0)
             {
                 return -1;
@@ -143,31 +143,15 @@ public abstract class SctpChunk
             return false;
         }
 
-        switch ((SctpChunkType)type)
+        chunk = (SctpChunkType)type switch
         {
-            case SctpChunkType.Data:
-                chunk = SctpDataChunk.Parse(buffer.Slice(0, length), flags);
-                break;
-            case SctpChunkType.Init:
-            case SctpChunkType.InitAck:
-                chunk = SctpInitChunk.Parse(buffer.Slice(0, length), (SctpChunkType)type, flags);
-                break;
-            case SctpChunkType.Sack:
-                chunk = SctpSackChunk.Parse(buffer.Slice(0, length), flags);
-                break;
-            case SctpChunkType.Shutdown:
-                chunk = SctpShutdownChunk.Parse(buffer.Slice(0, length), flags);
-                break;
-            case SctpChunkType.ShutdownAck:
-            case SctpChunkType.ShutdownComplete:
-            case SctpChunkType.CookieAck:
-                chunk = new SctpSimpleChunk { Type = (SctpChunkType)type, Flags = flags, Length = length };
-                break;
-            default:
-                chunk = new SctpUnknownChunk { Type = (SctpChunkType)type, Flags = flags, Length = length, Data = buffer.Slice(4, length - 4).ToArray() };
-                break;
-        }
-
+            SctpChunkType.Data => SctpDataChunk.Parse(buffer[..length], flags),
+            SctpChunkType.Init or SctpChunkType.InitAck => SctpInitChunk.Parse(buffer[..length], (SctpChunkType)type, flags),
+            SctpChunkType.Sack => SctpSackChunk.Parse(buffer[..length], flags),
+            SctpChunkType.Shutdown => SctpShutdownChunk.Parse(buffer[..length], flags),
+            SctpChunkType.ShutdownAck or SctpChunkType.ShutdownComplete or SctpChunkType.CookieAck => new SctpSimpleChunk { Type = (SctpChunkType)type, Flags = flags, Length = length },
+            _ => new SctpUnknownChunk { Type = (SctpChunkType)type, Flags = flags, Length = length, Data = buffer[4..length].ToArray() },
+        };
         return chunk != null;
     }
 
@@ -181,13 +165,13 @@ public abstract class SctpChunk
 
 public class SctpUnknownChunk : SctpChunk
 {
-    public byte[] Data { get; set; } = Array.Empty<byte>();
+    public byte[] Data { get; set; } = [];
     public override int GetSerializedLength() => 4 + Data.Length;
     public override int Serialize(Span<byte> buffer)
     {
         Length = (ushort)GetSerializedLength();
         WriteHeader(buffer);
-        Data.CopyTo(buffer.Slice(4));
+        Data.CopyTo(buffer[4..]);
         return Length;
     }
 }
@@ -209,7 +193,7 @@ public class SctpDataChunk : SctpChunk
     public ushort StreamId { get; set; }
     public ushort StreamSequenceNumber { get; set; }
     public uint PayloadProtocolId { get; set; }
-    public byte[] UserData { get; set; } = Array.Empty<byte>();
+    public byte[] UserData { get; set; } = [];
 
     public SctpDataChunk() { Type = SctpChunkType.Data; }
 
@@ -225,7 +209,7 @@ public class SctpDataChunk : SctpChunk
             StreamId = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(8, 2)),
             StreamSequenceNumber = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(10, 2)),
             PayloadProtocolId = BinaryPrimitives.ReadUInt32BigEndian(buffer.Slice(12, 4)),
-            UserData = buffer.Slice(16, buffer.Length - 16).ToArray()
+            UserData = buffer[16..].ToArray()
         };
         return chunk;
     }
@@ -243,7 +227,7 @@ public class SctpDataChunk : SctpChunk
         BinaryPrimitives.WriteUInt16BigEndian(buffer.Slice(8, 2), StreamId);
         BinaryPrimitives.WriteUInt16BigEndian(buffer.Slice(10, 2), StreamSequenceNumber);
         BinaryPrimitives.WriteUInt32BigEndian(buffer.Slice(12, 4), PayloadProtocolId);
-        UserData.CopyTo(buffer.Slice(16));
+        UserData.CopyTo(buffer[16..]);
         return Length;
     }
 }
@@ -296,8 +280,8 @@ public class SctpSackChunk : SctpChunk
 {
     public uint CumulativeTsnAck { get; set; }
     public uint AdvertisedReceiverWindowCredit { get; set; }
-    public List<(ushort Start, ushort End)> GapAckBlocks { get; set; } = new();
-    public List<uint> DuplicateTsns { get; set; } = new();
+    public List<(ushort Start, ushort End)> GapAckBlocks { get; set; } = [];
+    public List<uint> DuplicateTsns { get; set; } = [];
 
     public SctpSackChunk() { Type = SctpChunkType.Sack; }
 

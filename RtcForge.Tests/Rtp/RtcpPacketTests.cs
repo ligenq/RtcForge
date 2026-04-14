@@ -81,12 +81,12 @@ public class RtcpPacketTests
         {
             SenderSsrc = 1,
             MediaSsrc = 2,
-            LostSequenceNumbers = new List<ushort> { 10, 11, 13, 35 } // 10 base, 11 (+1), 13 (+3), 35 (new block)
+            LostSequenceNumbers = [10, 11, 13, 35] // 10 base, 11 (+1), 13 (+3), 35 (new block)
         };
-        
+
         byte[] buffer = new byte[nack.GetSerializedLength()];
         int len = nack.Serialize(buffer);
-        
+
         Assert.Equal(20, len); // 12 header + 4 byte block 1 + 4 byte block 2
         var parsed = RtcpNackPacket.TryParse(buffer, 1);
         Assert.NotNull(parsed);

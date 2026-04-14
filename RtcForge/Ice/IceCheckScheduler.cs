@@ -25,10 +25,10 @@ public class IceCandidatePair
 
 public class IceCheckScheduler
 {
-    private readonly List<IceCandidatePair> _pairs = new();
+    private readonly List<IceCandidatePair> _pairs = [];
     private readonly IIceAgent _agent;
     private readonly ITimer _timer;
-    private int _currentIndex = 0;
+    private int _currentIndex;
 
     public IceCheckScheduler(IIceAgent agent, TimeProvider? timeProvider = null)
     {

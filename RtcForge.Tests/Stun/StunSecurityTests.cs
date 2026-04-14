@@ -105,7 +105,7 @@ public class StunSecurityTests
         buffer[1] = 0x01;
         buffer[4] = 0x21; buffer[5] = 0x12; buffer[6] = 0xA4; buffer[7] = 0x42;
 
-        bool result = StunSecurity.ValidateMessageIntegrity(buffer, ReadOnlySpan<byte>.Empty);
+        bool result = StunSecurity.ValidateMessageIntegrity(buffer, []);
 
         Assert.False(result);
     }

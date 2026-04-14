@@ -6,8 +6,8 @@ public class OpusPacketizer
 {
     public List<RtpPacket> Packetize(ReadOnlySpan<byte> frame, uint timestamp, uint ssrc, ushort sequenceNumber)
     {
-        return new List<RtpPacket>
-        {
+        return
+        [
             new RtpPacket
             {
                 PayloadType = 111,
@@ -17,7 +17,7 @@ public class OpusPacketizer
                 Marker = true,
                 Payload = frame.ToArray().AsMemory()
             }
-        };
+        ];
     }
 }
 

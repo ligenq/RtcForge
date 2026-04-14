@@ -11,7 +11,7 @@ internal sealed class TurnAllocation : IDisposable
     private readonly Func<StunMessage, byte[]?, Task<StunMessage?>> _sendRequestAsync;
     private readonly Func<byte[], Task> _sendRawAsync;
     private readonly TimeProvider _timeProvider;
-    private readonly Dictionary<string, TurnPeerBinding> _bindings = new();
+    private readonly Dictionary<string, TurnPeerBinding> _bindings = [];
     private readonly CancellationTokenSource _cts = new();
     private ushort _nextChannelNumber = InitialChannelNumber;
 
@@ -282,7 +282,7 @@ internal sealed class TurnAllocation : IDisposable
     private static bool TryParseChannelData(ReadOnlySpan<byte> packet, out ushort channelNumber, out byte[] payload)
     {
         channelNumber = 0;
-        payload = Array.Empty<byte>();
+        payload = [];
 
         if (packet.Length < 4)
         {
@@ -295,7 +295,7 @@ internal sealed class TurnAllocation : IDisposable
             return false;
         }
 
-        channelNumber = BinaryPrimitives.ReadUInt16BigEndian(packet.Slice(0, 2));
+        channelNumber = BinaryPrimitives.ReadUInt16BigEndian(packet[..2]);
         int length = BinaryPrimitives.ReadUInt16BigEndian(packet.Slice(2, 2));
         if (packet.Length < 4 + length)
         {

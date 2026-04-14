@@ -437,9 +437,9 @@ internal static class Program
     {
         private readonly RTCPeerConnection _peerConnection;
         private readonly RTCDataChannel _serverChannel;
-        private readonly List<string> _localCandidates = new();
+        private readonly List<string> _localCandidates = [];
         private readonly Lock _candidateLock = new();
-        private readonly List<string> _messages = new();
+        private readonly List<string> _messages = [];
         private RTCDataChannel? _activeChannel;
 
         public BrowserSession(string id)

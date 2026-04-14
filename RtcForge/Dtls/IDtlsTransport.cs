@@ -23,7 +23,7 @@ public interface IDtlsTransport : IDisposable
 
 public class SrtpKeys
 {
-    public byte[] MasterKey { get; set; } = Array.Empty<byte>();
-    public byte[] MasterSalt { get; set; } = Array.Empty<byte>();
+    public byte[] MasterKey { get; set; } = [];
+    public byte[] MasterSalt { get; set; } = [];
     public ushort ProtectionProfile { get; set; }
 }

@@ -154,7 +154,7 @@ public class RtcpPliAndFirTests
         {
             SenderSsrc = 10,
             MediaSsrc = 20,
-            LostSequenceNumbers = new List<ushort> { 500 }
+            LostSequenceNumbers = [500]
         };
 
         byte[] buffer = new byte[nack.GetSerializedLength()];

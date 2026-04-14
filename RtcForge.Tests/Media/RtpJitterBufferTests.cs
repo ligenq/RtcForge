@@ -81,15 +81,15 @@ public class RtpJitterBufferTests
         var buffer = new RtpJitterBuffer(50, maxWaitTimeMs: 10);
         buffer.Push(new RtpPacket { SequenceNumber = 1 });
         Assert.Equal((ushort)1, buffer.Pop()?.SequenceNumber);
-        
+
         // Act
         buffer.Push(new RtpPacket { SequenceNumber = 3 }); // 2 is missing
-        
+
         var packet = buffer.Pop();
         Assert.Null(packet); // Initially null, waiting
-        
+
         await Task.Delay(TimeSpan.FromMilliseconds(50), TimeProvider.System); // wait for timeout
-        
+
         packet = buffer.Pop();
         Assert.NotNull(packet);
         Assert.Equal((ushort)3, packet.SequenceNumber); // 2 was skipped

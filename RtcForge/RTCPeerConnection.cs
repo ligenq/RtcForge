@@ -99,9 +99,9 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
     private SdpMessage? _localDescription;
     private SdpMessage? _remoteDescription;
     private Sctp.SctpAssociation? _sctpAssociation;
-    private readonly List<RTCDataChannel> _dataChannels = new();
+    private readonly List<RTCDataChannel> _dataChannels = [];
     private readonly Lock _dataChannelLock = new();
-    private readonly List<RTCRtpTransceiver> _transceivers = new();
+    private readonly List<RTCRtpTransceiver> _transceivers = [];
     private readonly Lock _transceiverLock = new();
     private DtlsTransport? _dtlsTransport;
     private RTCDtlsTransport? _publicDtlsTransport;
@@ -227,7 +227,7 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
         }
     }
 
-    private readonly HashSet<string> _announcedTracks = new();
+    private readonly HashSet<string> _announcedTracks = [];
 
     private void HandleIncomingRtpPacket(object? sender, UdpPacket packet)
     {
@@ -948,13 +948,13 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
             Port = 9,
             Proto = "UDP/DTLS/SCTP",
             Connection = "IN IP4 0.0.0.0",
-            Formats = new List<string> { "webrtc-datachannel" },
-            Attributes = new List<SdpAttribute>
-            {
+            Formats = ["webrtc-datachannel"],
+            Attributes =
+            [
                 new() { Name = "mid", Value = _dataChannelMid! },
                 new() { Name = "sctp-port", Value = DefaultSctpPort.ToString() },
                 new() { Name = "max-message-size", Value = DefaultMaxMessageSize.ToString() }
-            }
+            ]
         };
         AppendLocalIceAttributes(md);
         return md;

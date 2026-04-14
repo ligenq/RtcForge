@@ -3,7 +3,7 @@ namespace RtcForge.Media;
 public class MediaStream
 {
     public string Id { get; } = Guid.NewGuid().ToString();
-    private readonly List<MediaStreamTrack> _tracks = new();
+    private readonly List<MediaStreamTrack> _tracks = [];
 
     public MediaStream() { }
 

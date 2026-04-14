@@ -182,7 +182,7 @@ public class RtcpNackPacket : RtcpPacket
 {
     public uint SenderSsrc { get; set; }
     public uint MediaSsrc { get; set; }
-    public List<ushort> LostSequenceNumbers { get; set; } = new();
+    public List<ushort> LostSequenceNumbers { get; set; } = [];
 
     public RtcpNackPacket()
     {
@@ -269,7 +269,7 @@ public class RtcpNackPacket : RtcpPacket
         {
             ushort seq = LostSequenceNumbers[i];
             int diff = (ushort)(seq - currentPid);
-            
+
             if (diff >= 1 && diff <= 16)
             {
                 currentBlp |= (ushort)(1 << (diff - 1));
@@ -292,7 +292,7 @@ public class RtcpNackPacket : RtcpPacket
         WriteHeader(buffer, (ushort)((len / 4) - 1));
         BinaryPrimitives.WriteUInt32BigEndian(buffer.Slice(4, 4), SenderSsrc);
         BinaryPrimitives.WriteUInt32BigEndian(buffer.Slice(8, 4), MediaSsrc);
-        
+
         int offset = 12;
         foreach (var block in blocks)
         {
@@ -300,7 +300,7 @@ public class RtcpNackPacket : RtcpPacket
             BinaryPrimitives.WriteUInt16BigEndian(buffer.Slice(offset + 2, 2), block.Blp);
             offset += 4;
         }
-        
+
         return len;
     }
 }

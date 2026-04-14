@@ -34,7 +34,7 @@ public class IceCandidate
     {
         if (candidateLine.StartsWith("candidate:"))
         {
-            candidateLine = candidateLine.Substring(10);
+            candidateLine = candidateLine[10..];
         }
 
         var parts = candidateLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);

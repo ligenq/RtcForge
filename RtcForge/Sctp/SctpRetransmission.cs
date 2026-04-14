@@ -16,14 +16,14 @@ internal class SctpOutboundChunk
 
 public partial class SctpAssociation
 {
-    private readonly Dictionary<uint, SctpOutboundChunk> _outboundQueue = new();
+    private readonly Dictionary<uint, SctpOutboundChunk> _outboundQueue = [];
     private readonly Lock _outboundLock = new();
     private int _rto = 1000; // Retransmission Timeout in ms
     private int _srtt = -1;  // Smoothed Round Trip Time
     private int _rttvar = -1; // RTT Variation
     private uint _cwnd = 3000;
     private uint _ssthresh = 65535;
-    private uint _outstandingBytes = 0;
+    private uint _outstandingBytes;
 
     private async Task CheckRetransmissionsAsync()
     {
@@ -115,7 +115,7 @@ public partial class SctpAssociation
         await SendChunkInternalAsync(new SctpShutdownChunk { CumulativeTsnAck = _cumulativeTsnAckPoint });
     }
 
-    private async Task HandleShutdown(SctpShutdownChunk shutdown)
+    private async Task HandleShutdown(SctpShutdownChunk _)
     {
         // RFC 4960 Section 9.2
         _state = SctpAssociationState.ShutdownReceived;

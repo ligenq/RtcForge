@@ -3,7 +3,7 @@ namespace RtcForge.Sctp;
 internal class SctpStream
 {
     public ushort StreamId { get; }
-    private readonly Dictionary<ushort, List<SctpDataChunk>> _reassemblyBuffer = new();
+    private readonly Dictionary<ushort, List<SctpDataChunk>> _reassemblyBuffer = [];
     private readonly Action<uint, byte[]> _onMessage;
 
     public SctpStream(ushort streamId, Action<uint, byte[]> onMessage)
@@ -22,7 +22,7 @@ internal class SctpStream
                 _reassemblyBuffer.Remove(oldest);
             }
 
-            fragments = new List<SctpDataChunk>();
+            fragments = [];
             _reassemblyBuffer[chunk.StreamSequenceNumber] = fragments;
         }
 

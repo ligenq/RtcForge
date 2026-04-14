@@ -7,7 +7,7 @@ namespace RtcForge.Media;
 /// </summary>
 public class RtpJitterBuffer
 {
-    private readonly SortedDictionary<ushort, RtpPacket> _buffer = new();
+    private readonly SortedDictionary<ushort, RtpPacket> _buffer = [];
     private readonly int _maxPackets;
     private ushort? _lastPoppedSeq;
     private readonly Lock _lock = new();
