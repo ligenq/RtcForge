@@ -14,6 +14,7 @@ internal sealed class TurnAllocation : IDisposable
     private readonly Dictionary<string, TurnPeerBinding> _bindings = [];
     private readonly CancellationTokenSource _cts = new();
     private ushort _nextChannelNumber = InitialChannelNumber;
+    private int _disposed;
 
     public TurnAllocation(
         IPEndPoint serverEndPoint,
@@ -324,8 +325,14 @@ internal sealed class TurnAllocation : IDisposable
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
         _cts.Cancel();
         _cts.Dispose();
+        GC.SuppressFinalize(this);
     }
 
     private sealed class TurnPeerBinding

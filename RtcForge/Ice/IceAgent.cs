@@ -39,6 +39,7 @@ public class IceAgent : IIceAgent
     private readonly SemaphoreSlim _connectGate = new(1, 1);
     private CancellationTokenSource? _consentCts;
     private readonly TimeProvider _timeProvider;
+    private int _disposed;
 
     public IceState State
     {
@@ -1139,6 +1140,11 @@ public class IceAgent : IIceAgent
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
         _cts.Cancel();
         StopConsentFreshnessLoop();
         foreach (var allocation in _turnAllocations.Values)

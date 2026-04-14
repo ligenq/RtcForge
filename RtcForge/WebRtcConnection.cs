@@ -275,7 +275,7 @@ public sealed class WebRtcConnection : IWebRtcConnection
     private readonly Channel<IWebRtcDataChannel> _dataChannels = Channel.CreateUnbounded<IWebRtcDataChannel>();
     private readonly Channel<PeerConnectionState> _connectionStates = Channel.CreateUnbounded<PeerConnectionState>();
     private readonly Channel<SignalingState> _signalingStates = Channel.CreateUnbounded<SignalingState>();
-    private bool _disposed;
+    private int _disposed;
 
     /// <summary>
     /// Creates a connection from high-level connection options.
@@ -427,12 +427,11 @@ public sealed class WebRtcConnection : IWebRtcConnection
     /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {
-        if (_disposed)
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
             return;
         }
 
-        _disposed = true;
         _peerConnection.OnIceCandidate -= HandleIceCandidate;
         _peerConnection.OnDataChannel -= HandleDataChannel;
         _peerConnection.OnConnectionStateChange -= HandleConnectionStateChange;
@@ -480,7 +479,7 @@ public sealed class WebRtcDataChannel : IWebRtcDataChannel
             SingleWriter = false
         });
     private readonly TaskCompletionSource _opened = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private bool _disposed;
+    private int _disposed;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="WebRtcDataChannel"/> class.
@@ -530,12 +529,11 @@ public sealed class WebRtcDataChannel : IWebRtcDataChannel
     /// <inheritdoc />
     public ValueTask DisposeAsync()
     {
-        if (_disposed)
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
             return ValueTask.CompletedTask;
         }
 
-        _disposed = true;
         _inner.OnOpen -= HandleOpen;
         _inner.OnClose -= HandleClose;
         _inner.OnBinaryMessage -= HandleBinaryMessage;
@@ -584,7 +582,7 @@ internal sealed class WebRtcDataChannelStream : Stream
     private byte[]? _currentBuffer;
     private int _currentOffset;
     private volatile bool _inputCompleted;
-    private bool _disposed;
+    private int _disposed;
 
     public WebRtcDataChannelStream(IWebRtcDataChannel channel)
     {
@@ -592,9 +590,9 @@ internal sealed class WebRtcDataChannelStream : Stream
         _messagePump = Task.Run(ProcessMessagesAsync);
     }
 
-    public override bool CanRead => !_disposed;
+    public override bool CanRead => Volatile.Read(ref _disposed) == 0;
     public override bool CanSeek => false;
-    public override bool CanWrite => !_disposed;
+    public override bool CanWrite => Volatile.Read(ref _disposed) == 0;
     public override long Length => throw new NotSupportedException();
     public override long Position
     {
@@ -610,7 +608,7 @@ internal sealed class WebRtcDataChannelStream : Stream
 
     public override int Read(byte[] buffer, int offset, int count)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfDisposed();
 
         while (true)
         {
@@ -625,7 +623,7 @@ internal sealed class WebRtcDataChannelStream : Stream
                 return 0;
             }
 
-            ObjectDisposedException.ThrowIf(_disposed, this);
+            ThrowIfDisposed();
 
             if (TryDequeueFrame(out var next))
             {
@@ -637,7 +635,7 @@ internal sealed class WebRtcDataChannelStream : Stream
 
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfDisposed();
 
         while (true)
         {
@@ -652,7 +650,7 @@ internal sealed class WebRtcDataChannelStream : Stream
                 return 0;
             }
 
-            ObjectDisposedException.ThrowIf(_disposed, this);
+            ThrowIfDisposed();
 
             if (TryDequeueFrame(out var next))
             {
@@ -677,7 +675,7 @@ internal sealed class WebRtcDataChannelStream : Stream
 
     public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfDisposed();
 
         byte[] frame = new byte[sizeof(int) + buffer.Length];
         BinaryPrimitives.WriteInt32BigEndian(frame.AsSpan(0, sizeof(int)), buffer.Length);
@@ -687,9 +685,8 @@ internal sealed class WebRtcDataChannelStream : Stream
 
     protected override void Dispose(bool disposing)
     {
-        if (!_disposed)
+        if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
-            _disposed = true;
             _cts.Cancel();
             _incomingFrames.Writer.TryComplete();
             _availableFrames.Release();
@@ -701,9 +698,9 @@ internal sealed class WebRtcDataChannelStream : Stream
 
     public override async ValueTask DisposeAsync()
     {
-        if (!_disposed)
+        bool disposeStarted = Interlocked.Exchange(ref _disposed, 1) == 0;
+        if (disposeStarted)
         {
-            _disposed = true;
             _cts.Cancel();
             _incomingFrames.Writer.TryComplete();
             _availableFrames.Release();
@@ -718,7 +715,11 @@ internal sealed class WebRtcDataChannelStream : Stream
         }
 
         _cts.Dispose();
-        await _channel.DisposeAsync().ConfigureAwait(false);
+        if (disposeStarted)
+        {
+            await _channel.DisposeAsync().ConfigureAwait(false);
+        }
+
         await base.DisposeAsync().ConfigureAwait(false);
     }
 
@@ -785,7 +786,7 @@ internal sealed class WebRtcDataChannelStream : Stream
 
     private async Task EnqueueFrameAsync(byte[] frame)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfDisposed();
         await _incomingFrames.Writer.WriteAsync(frame, _cts.Token).ConfigureAwait(false);
         _availableFrames.Release();
     }
@@ -793,5 +794,10 @@ internal sealed class WebRtcDataChannelStream : Stream
     private bool TryDequeueFrame(out byte[]? frame)
     {
         return _incomingFrames.Reader.TryRead(out frame);
+    }
+
+    private void ThrowIfDisposed()
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
     }
 }

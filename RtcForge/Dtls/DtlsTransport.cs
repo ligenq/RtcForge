@@ -31,6 +31,7 @@ public sealed class DtlsTransport : IDtlsTransport
     private readonly Lock _sendLock = new();
     private string? _remoteFingerprint;
     private string? _remoteFingerprintAlg;
+    private int _disposed;
 
     public DtlsState State
     {
@@ -184,9 +185,15 @@ public sealed class DtlsTransport : IDtlsTransport
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
         State = DtlsState.Closed;
         _dtlsTransport?.Close();
         _bcTransport?.Close();
+        GC.SuppressFinalize(this);
     }
 }
 

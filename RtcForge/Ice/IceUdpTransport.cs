@@ -15,6 +15,7 @@ public class IceUdpTransport : IDisposable
     private readonly Channel<UdpPacket> _receiveChannel;
     private readonly CancellationTokenSource _cts = new();
     private readonly ILogger<IceUdpTransport>? _logger;
+    private int _disposed;
 
     public IPEndPoint LocalEndPoint => (IPEndPoint)_udpClient.Client.LocalEndPoint!;
 
@@ -89,10 +90,16 @@ public class IceUdpTransport : IDisposable
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
         _cts.Cancel();
         _udpClient.Close(); // Close first to unblock ReceiveAsync
         _udpClient.Dispose();
         _cts.Dispose();
+        GC.SuppressFinalize(this);
     }
 }
 

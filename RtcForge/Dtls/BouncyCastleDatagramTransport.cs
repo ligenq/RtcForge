@@ -10,6 +10,7 @@ internal sealed class BouncyCastleDatagramTransport : DatagramTransport
     private readonly Channel<byte[]> _sendChannel = Channel.CreateUnbounded<byte[]>();
     private readonly Func<byte[], Task> _sendFunc;
     private readonly Task _sendLoop;
+    private int _closed;
 
     public BouncyCastleDatagramTransport(Func<byte[], Task> sendFunc)
     {
@@ -71,6 +72,11 @@ internal sealed class BouncyCastleDatagramTransport : DatagramTransport
 
     public void Close()
     {
+        if (Interlocked.Exchange(ref _closed, 1) != 0)
+        {
+            return;
+        }
+
         _receiveQueue.CompleteAdding();
         _sendChannel.Writer.TryComplete();
     }

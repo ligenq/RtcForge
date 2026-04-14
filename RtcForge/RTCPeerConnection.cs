@@ -115,7 +115,7 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
     private readonly TimeProvider _timeProvider;
     private readonly TimeSpan _connectionTimeout;
     private readonly CancellationTokenSource _cts = new();
-    private bool _disposed;
+    private int _disposed;
 
     /// <summary>
     /// Gets the current SDP signaling state.
@@ -685,8 +685,11 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
     /// </summary>
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
         _cts.Cancel();
         _sctpAssociation?.Dispose();
         _dtlsTransport?.Dispose();
@@ -709,8 +712,11 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
     /// <returns>A value task that completes when shutdown has finished.</returns>
     public async ValueTask DisposeAsync()
     {
-        if (_disposed) return;
-        _disposed = true;
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
         _cts.Cancel();
         if (_sctpAssociation != null)
         {
