@@ -19,20 +19,22 @@ public class IceAgent : IIceAgent
         "1",
         StringComparison.Ordinal);
     private IceState _state = IceState.New;
-    private readonly List<IceCandidate> _localCandidates = new();
-    private readonly List<IceCandidate> _remoteCandidates = new();
+#if NET9_0_OR_GREATER
+    private readonly Lock _candidateLock = new();
+#else
     private readonly object _candidateLock = new();
-    private readonly List<IceUdpTransport> _transports = new();
+#endif
+    private readonly List<IceCandidate> _localCandidates = [];
+    private readonly List<IceCandidate> _remoteCandidates = [];
+    private readonly List<IceUdpTransport> _transports = [];
     private readonly ConcurrentDictionary<string, TaskCompletionSource<StunMessage>> _transactions = new();
-    private string _localUfrag;
-    private string _localPassword;
     private string? _remoteUfrag;
     private string? _remotePassword;
     private readonly CancellationTokenSource _cts = new();
-    private readonly List<IceCandidatePair> _checklist = new();
+    private readonly List<IceCandidatePair> _checklist = [];
     private readonly ulong _tieBreaker;
-    private readonly List<RTCIceServer> _iceServers = new();
-    private readonly Dictionary<string, TurnAllocation> _turnAllocations = new();
+    private readonly List<RTCIceServer> _iceServers = [];
+    private readonly Dictionary<string, TurnAllocation> _turnAllocations = [];
     private IceUdpTransport? _selectedTransport;
     private IceCandidate? _selectedLocalCandidate;
     private IceCandidate? _selectedRemoteCandidate;
@@ -55,9 +57,9 @@ public class IceAgent : IIceAgent
         }
     }
 
-    public string LocalUfrag => _localUfrag;
-    public string LocalPassword => _localPassword;
-    public IReadOnlyList<IceCandidate> LocalCandidates { get { lock (_candidateLock) { return _localCandidates.ToList(); } } }
+    public string LocalUfrag { get; }
+    public string LocalPassword { get; }
+    public IReadOnlyList<IceCandidate> LocalCandidates { get { lock (_candidateLock) { return [.. _localCandidates]; } } }
     public bool IsControlling { get; set; } = true;
     internal IceCandidate? SelectedRemoteCandidate => _selectedRemoteCandidate;
 
@@ -75,10 +77,10 @@ public class IceAgent : IIceAgent
         _loggerFactory = loggerFactory;
         _logger = loggerFactory?.CreateLogger<IceAgent>();
         _timeProvider = timeProvider ?? TimeProvider.System;
-        _localUfrag = GenerateRandomString(8);
-        _localPassword = GenerateRandomString(24);
+        LocalUfrag = GenerateRandomString(8);
+        LocalPassword = GenerateRandomString(24);
         _tieBreaker = BinaryPrimitives.ReadUInt64LittleEndian(RandomNumberGenerator.GetBytes(8));
-        Trace($"created ufrag={_localUfrag}");
+        Trace($"created ufrag={LocalUfrag}");
     }
 
     public void SetIceServers(IEnumerable<RTCIceServer> servers)
@@ -129,7 +131,7 @@ public class IceAgent : IIceAgent
                             Foundation = "1",
                             Component = 1,
                             Protocol = "udp",
-                            Priority = CalculateHostPriority(ni, ip.Address),
+                            Priority = CalculateHostPriority(),
                             Address = ip.Address.ToString(),
                             Port = transport.LocalEndPoint.Port,
                             Type = IceCandidateType.Host
@@ -221,7 +223,7 @@ public class IceAgent : IIceAgent
                         var turnEp = new IPEndPoint(Dns.GetHostAddresses(uri.Host)[0], uri.Port > 0 ? uri.Port : 3478);
 
                         var request = new StunMessage { Type = StunMessageType.AllocateRequest, TransactionId = Guid.NewGuid().ToByteArray().AsSpan(0, 12).ToArray() };
-                        request.Attributes.Add(new StunAttribute { Type = StunAttributeType.RequestedTransport, Value = new byte[] { 17, 0, 0, 0 } });
+                        request.Attributes.Add(new StunAttribute { Type = StunAttributeType.RequestedTransport, Value = [17, 0, 0, 0] });
 
                         var response = await SendTransactionAsync(transport, turnEp, request);
                         if (response?.Type == StunMessageType.AllocateErrorResponse)
@@ -243,7 +245,7 @@ public class IceAgent : IIceAgent
                                     for (int attempt = 0; attempt < 2; attempt++)
                                     {
                                         var authRequest = new StunMessage { Type = StunMessageType.AllocateRequest, TransactionId = Guid.NewGuid().ToByteArray().AsSpan(0, 12).ToArray() };
-                                        authRequest.Attributes.Add(new StunAttribute { Type = StunAttributeType.RequestedTransport, Value = new byte[] { 17, 0, 0, 0 } });
+                                        authRequest.Attributes.Add(new StunAttribute { Type = StunAttributeType.RequestedTransport, Value = [17, 0, 0, 0] });
                                         authRequest.Attributes.Add(new StunAttribute { Type = StunAttributeType.Username, Value = System.Text.Encoding.UTF8.GetBytes(server.Username) });
                                         authRequest.Attributes.Add(new StunAttribute { Type = StunAttributeType.Realm, Value = currentRealm });
                                         authRequest.Attributes.Add(new StunAttribute { Type = StunAttributeType.Nonce, Value = currentNonce });
@@ -368,13 +370,13 @@ public class IceAgent : IIceAgent
         }
     }
 
-    private uint CalculateSrflxPriority() => (100 << 24) | (65535 << 8) | (256 - 1);
+    private static uint CalculateSrflxPriority() => (100 << 24) | (65535 << 8) | (256 - 1);
 
-    private uint CalculateHostPriority(NetworkInterface ni, IPAddress addr)
+    private static uint CalculateHostPriority()
     {
-        uint typePref = 126;
-        uint localPref = 65535;
-        uint componentId = 1;
+        const uint typePref = 126;
+        const uint localPref = 65535;
+        const uint componentId = 1;
         return (typePref << 24) | (localPref << 8) | (256 - componentId);
     }
 
@@ -419,7 +421,7 @@ public class IceAgent : IIceAgent
 
         byte firstByte = packet.Span[0];
 
-        if (firstByte >= 0 && firstByte <= 3)
+        if (firstByte <= 3)
         {
             if (StunMessage.TryParse(packet.Span, out var stun))
             {
@@ -482,14 +484,14 @@ public class IceAgent : IIceAgent
     {
         if (request.RawBytes == null
             || !StunSecurity.ValidateFingerprint(request.RawBytes)
-            || string.IsNullOrEmpty(_localPassword)
-            || !StunSecurity.ValidateMessageIntegrity(request.RawBytes, System.Text.Encoding.UTF8.GetBytes(_localPassword)))
+            || string.IsNullOrEmpty(LocalPassword)
+            || !StunSecurity.ValidateMessageIntegrity(request.RawBytes, System.Text.Encoding.UTF8.GetBytes(LocalPassword)))
         {
             return;
         }
 
         var userAttr = request.Attributes.FirstOrDefault(a => a.Type == StunAttributeType.Username);
-        if (userAttr == null || System.Text.Encoding.UTF8.GetString(userAttr.Value) != $"{_localUfrag}:{_remoteUfrag}")
+        if (userAttr == null || System.Text.Encoding.UTF8.GetString(userAttr.Value) != $"{LocalUfrag}:{_remoteUfrag}")
         {
             return;
         }
@@ -529,7 +531,7 @@ public class IceAgent : IIceAgent
         response.Attributes.Add(new StunAttribute { Type = StunAttributeType.Fingerprint });
 
         byte[] buffer = new byte[response.GetSerializedLength()];
-        response.Serialize(buffer, System.Text.Encoding.UTF8.GetBytes(_localPassword));
+        response.Serialize(buffer, System.Text.Encoding.UTF8.GetBytes(LocalPassword));
         await transport.SendAsync(buffer, remoteEndPoint);
     }
 
@@ -593,8 +595,8 @@ public class IceAgent : IIceAgent
             List<IceCandidate> localSnapshot, remoteSnapshot;
             lock (_candidateLock)
             {
-                localSnapshot = _localCandidates.ToList();
-                remoteSnapshot = _remoteCandidates.ToList();
+                localSnapshot = [.. _localCandidates];
+                remoteSnapshot = [.. _remoteCandidates];
             }
             foreach (var local in localSnapshot)
             {
@@ -700,11 +702,8 @@ public class IceAgent : IIceAgent
 
         if (_selectedLocalCandidate.Type == IceCandidateType.Relay)
         {
-            var allocation = GetTurnAllocation(_selectedLocalCandidate);
-            if (allocation == null)
-            {
-                throw new InvalidOperationException("TURN allocation not found for selected relay candidate.");
-            }
+            var allocation = GetTurnAllocation(_selectedLocalCandidate)
+                ?? throw new InvalidOperationException("TURN allocation not found for selected relay candidate.");
 
             await allocation.SendToPeerAsync(data, remoteEp, _cts.Token).ConfigureAwait(false);
             return;
@@ -778,7 +777,7 @@ public class IceAgent : IIceAgent
             TransactionId = Guid.NewGuid().ToByteArray().AsSpan(0, 12).ToArray()
         };
 
-        request.Attributes.Add(new StunAttribute { Type = StunAttributeType.Username, Value = System.Text.Encoding.UTF8.GetBytes($"{_remoteUfrag}:{_localUfrag}") });
+        request.Attributes.Add(new StunAttribute { Type = StunAttributeType.Username, Value = System.Text.Encoding.UTF8.GetBytes($"{_remoteUfrag}:{LocalUfrag}") });
         byte[] priorityBytes = new byte[4];
         System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(priorityBytes, 100);
         request.Attributes.Add(new StunAttribute { Type = StunAttributeType.Priority, Value = priorityBytes });
@@ -792,7 +791,7 @@ public class IceAgent : IIceAgent
 
         if (useCandidate)
         {
-            request.Attributes.Add(new StunAttribute { Type = StunAttributeType.UseCandidate, Value = Array.Empty<byte>() });
+            request.Attributes.Add(new StunAttribute { Type = StunAttributeType.UseCandidate, Value = [] });
         }
 
         request.Attributes.Add(new StunAttribute { Type = StunAttributeType.MessageIntegrity });
@@ -828,8 +827,8 @@ public class IceAgent : IIceAgent
 
         return stun.Type switch
         {
-            StunMessageType.BindingRequest => !string.IsNullOrEmpty(_localPassword)
-                && StunSecurity.ValidateMessageIntegrity(stun.RawBytes, System.Text.Encoding.UTF8.GetBytes(_localPassword)),
+            StunMessageType.BindingRequest => !string.IsNullOrEmpty(LocalPassword)
+                && StunSecurity.ValidateMessageIntegrity(stun.RawBytes, System.Text.Encoding.UTF8.GetBytes(LocalPassword)),
             StunMessageType.BindingSuccessResponse => !string.IsNullOrEmpty(_remotePassword)
                 && StunSecurity.ValidateMessageIntegrity(stun.RawBytes, System.Text.Encoding.UTF8.GetBytes(_remotePassword)),
             StunMessageType.BindingErrorResponse => !string.IsNullOrEmpty(_remotePassword)
@@ -916,7 +915,7 @@ public class IceAgent : IIceAgent
         response.Attributes.Add(new StunAttribute { Type = StunAttributeType.Fingerprint });
 
         byte[] buffer = new byte[response.GetSerializedLength()];
-        response.Serialize(buffer, System.Text.Encoding.UTF8.GetBytes(_localPassword!));
+        response.Serialize(buffer, System.Text.Encoding.UTF8.GetBytes(LocalPassword!));
         await transport.SendAsync(buffer, remoteEndPoint).ConfigureAwait(false);
         return true;
     }
@@ -1131,7 +1130,10 @@ public class IceAgent : IIceAgent
 
     private void Trace(string message)
     {
-        _logger?.LogDebug("{Message}", message);
+        if (TraceEnabled && _logger?.IsEnabled(LogLevel.Debug) == true)
+        {
+            _logger.LogDebug("{Message}", message);
+        }
     }
 
     public void Dispose()
@@ -1149,5 +1151,6 @@ public class IceAgent : IIceAgent
 
         _connectGate.Dispose();
         _cts.Dispose();
+        GC.SuppressFinalize(this);
     }
 }

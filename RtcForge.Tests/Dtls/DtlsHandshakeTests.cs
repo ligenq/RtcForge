@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using RtcForge.Dtls;
 
 namespace RtcForge.Tests.Dtls;

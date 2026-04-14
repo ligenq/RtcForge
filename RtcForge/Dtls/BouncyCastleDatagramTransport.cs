@@ -6,7 +6,7 @@ namespace RtcForge.Dtls;
 
 internal sealed class BouncyCastleDatagramTransport : DatagramTransport
 {
-    private readonly BlockingCollection<byte[]> _receiveQueue = new();
+    private readonly BlockingCollection<byte[]> _receiveQueue = [];
     private readonly Channel<byte[]> _sendChannel = Channel.CreateUnbounded<byte[]>();
     private readonly Func<byte[], Task> _sendFunc;
     private readonly Task _sendLoop;

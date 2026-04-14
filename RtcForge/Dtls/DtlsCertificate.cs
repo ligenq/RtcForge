@@ -7,12 +7,11 @@ using Org.BouncyCastle.Crypto.Parameters;
 using Org.BouncyCastle.Math;
 using Org.BouncyCastle.Security;
 using Org.BouncyCastle.X509;
-using Org.BouncyCastle.Tls.Crypto;
 using Org.BouncyCastle.Tls.Crypto.Impl.BC;
 
 namespace RtcForge.Dtls;
 
-public class DtlsCertificate
+public sealed class DtlsCertificate
 {
     public Org.BouncyCastle.Tls.Certificate TlsCertificate { get; }
     public AsymmetricKeyParameter PrivateKey { get; }
@@ -48,7 +47,7 @@ public class DtlsCertificate
 
         // Convert to Org.BouncyCastle.Tls.Certificate
         byte[] der = x509Cert.GetEncoded();
-        var tlsCert = new Org.BouncyCastle.Tls.Certificate(new TlsCertificate[] { crypto.CreateCertificate(der) });
+        var tlsCert = new Org.BouncyCastle.Tls.Certificate([crypto.CreateCertificate(der)]);
 
         // Calculate fingerprint
         byte[] hash = SHA256.HashData(der);
