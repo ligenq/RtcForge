@@ -40,6 +40,7 @@ public class IceAgent : IIceAgent
     private bool _gatheringStarted;
     private readonly SemaphoreSlim _connectGate = new(1, 1);
     private CancellationTokenSource? _consentCts;
+    private readonly TimeProvider _timeProvider;
 
     public IceState State
     {
@@ -69,10 +70,11 @@ public class IceAgent : IIceAgent
     private readonly ILoggerFactory? _loggerFactory;
     private readonly ILogger<IceAgent>? _logger;
 
-    public IceAgent(ILoggerFactory? loggerFactory = null)
+    public IceAgent(ILoggerFactory? loggerFactory = null, TimeProvider? timeProvider = null)
     {
         _loggerFactory = loggerFactory;
         _logger = loggerFactory?.CreateLogger<IceAgent>();
+        _timeProvider = timeProvider ?? TimeProvider.System;
         _localUfrag = GenerateRandomString(8);
         _localPassword = GenerateRandomString(24);
         _tieBreaker = BinaryPrimitives.ReadUInt64LittleEndian(RandomNumberGenerator.GetBytes(8));
@@ -307,7 +309,8 @@ public class IceAgent : IIceAgent
                                                 key,
                                                 TimeSpan.FromSeconds(allocationLifetimeSeconds),
                                                 (request, integrityKey) => SendTransactionAsync(transport, turnEp, request, integrityKey),
-                                                payload => transport.SendAsync(payload, turnEp));
+                                                payload => transport.SendAsync(payload, turnEp),
+                                                _timeProvider);
                                             lock (_candidateLock) { _localCandidates.Add(relayCandidate); }
                                             OnLocalCandidate?.Invoke(this, relayCandidate);
                                             Trace($"local candidate {relayCandidate}");
@@ -326,7 +329,7 @@ public class IceAgent : IIceAgent
         }
     }
 
-    private async Task<StunMessage?> SendTransactionAsync(IceUdpTransport transport, IPEndPoint remoteEp, StunMessage request, byte[]? key = null)
+    private async Task<StunMessage?> SendTransactionAsync(IceUdpTransport transport, IPEndPoint remoteEp, StunMessage request, byte[]? key = null, CancellationToken cancellationToken = default)
     {
         const int maxRetransmissions = 4;
         const int initialRtoMs = 500;
@@ -343,13 +346,16 @@ public class IceAgent : IIceAgent
 
             for (int attempt = 0; attempt <= maxRetransmissions; attempt++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 await transport.SendAsync(buffer, remoteEp);
 
-                var resultTask = await Task.WhenAny(tcs.Task, Task.Delay(rtoMs));
+                var delayTask = Task.Delay(TimeSpan.FromMilliseconds(rtoMs), _timeProvider, cancellationToken);
+                var resultTask = await Task.WhenAny(tcs.Task, delayTask);
                 if (resultTask == tcs.Task)
                 {
                     return await tcs.Task;
                 }
+                cancellationToken.ThrowIfCancellationRequested();
 
                 rtoMs = Math.Min(rtoMs * 2, 8000);
             }
@@ -568,16 +574,20 @@ public class IceAgent : IIceAgent
         }
     }
 
-    public async Task<bool> ConnectAsync()
+    public async Task<bool> ConnectAsync(CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(_remoteUfrag) || string.IsNullOrEmpty(_remotePassword))
         {
             throw new InvalidOperationException("Remote credentials not set");
         }
 
-        await _connectGate.WaitAsync(_cts.Token).ConfigureAwait(false);
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
+        var connectToken = linkedCts.Token;
+
+        await _connectGate.WaitAsync(connectToken).ConfigureAwait(false);
         try
         {
+            connectToken.ThrowIfCancellationRequested();
             State = IceState.Checking;
             _checklist.Clear();
             List<IceCandidate> localSnapshot, remoteSnapshot;
@@ -616,7 +626,7 @@ public class IceAgent : IIceAgent
                     continue;
                 }
 
-                var remoteEp = await ResolveRemoteEndPointAsync(pair.Remote, _cts.Token).ConfigureAwait(false);
+                var remoteEp = await ResolveRemoteEndPointAsync(pair.Remote, connectToken).ConfigureAwait(false);
                 if (remoteEp == null)
                 {
                     Trace($"pair unresolved local={pair.Local} remote={pair.Remote}");
@@ -625,18 +635,18 @@ public class IceAgent : IIceAgent
                 }
 
                 Trace($"checking pair local={pair.Local.Address}:{pair.Local.Port} remote={remoteEp}");
-                var response = await SendStunBindingRequestAsync(transport, remoteEp).ConfigureAwait(false);
+                var response = await SendStunBindingRequestAsync(transport, remoteEp, cancellationToken: connectToken).ConfigureAwait(false);
                 if (IsRoleConflictResponse(response))
                 {
                     pair.State = IceState.New;
-                    response = await SendStunBindingRequestAsync(transport, remoteEp).ConfigureAwait(false);
+                    response = await SendStunBindingRequestAsync(transport, remoteEp, cancellationToken: connectToken).ConfigureAwait(false);
                 }
 
                 if (response?.Type == StunMessageType.BindingSuccessResponse)
                 {
                     if (IsControlling)
                     {
-                        var nomination = await SendStunBindingRequestAsync(transport, remoteEp, useCandidate: true).ConfigureAwait(false);
+                        var nomination = await SendStunBindingRequestAsync(transport, remoteEp, useCandidate: true, cancellationToken: connectToken).ConfigureAwait(false);
                         if (IsRoleConflictResponse(nomination))
                         {
                             pair.State = IceState.New;
@@ -737,14 +747,14 @@ public class IceAgent : IIceAgent
 
             Trace($"triggered nomination local={local.Address}:{local.Port} remote={remoteEp}");
             State = IceState.Checking;
-            var response = await SendStunBindingRequestAsync(transport, remoteEp).ConfigureAwait(false);
+            var response = await SendStunBindingRequestAsync(transport, remoteEp, cancellationToken: _cts.Token).ConfigureAwait(false);
             if (response?.Type != StunMessageType.BindingSuccessResponse)
             {
                 Trace($"triggered check failed remote={remoteEp} response={response?.Type.ToString() ?? "null"}");
                 return;
             }
 
-            var nomination = await SendStunBindingRequestAsync(transport, remoteEp, useCandidate: true).ConfigureAwait(false);
+            var nomination = await SendStunBindingRequestAsync(transport, remoteEp, useCandidate: true, cancellationToken: _cts.Token).ConfigureAwait(false);
             if (nomination?.Type == StunMessageType.BindingSuccessResponse)
             {
                 SelectPair(transport, local, remote, nominated: true);
@@ -760,7 +770,7 @@ public class IceAgent : IIceAgent
         }
     }
 
-    private async Task<StunMessage?> SendStunBindingRequestAsync(IceUdpTransport transport, IPEndPoint remoteEp, bool useCandidate = false)
+    private async Task<StunMessage?> SendStunBindingRequestAsync(IceUdpTransport transport, IPEndPoint remoteEp, bool useCandidate = false, CancellationToken cancellationToken = default)
     {
         var request = new StunMessage
         {
@@ -788,7 +798,7 @@ public class IceAgent : IIceAgent
         request.Attributes.Add(new StunAttribute { Type = StunAttributeType.MessageIntegrity });
         request.Attributes.Add(new StunAttribute { Type = StunAttributeType.Fingerprint });
 
-        var response = await SendTransactionAsync(transport, remoteEp, request, System.Text.Encoding.UTF8.GetBytes(_remotePassword!)).ConfigureAwait(false);
+        var response = await SendTransactionAsync(transport, remoteEp, request, System.Text.Encoding.UTF8.GetBytes(_remotePassword!), cancellationToken).ConfigureAwait(false);
         if (IsRoleConflictResponse(response))
         {
             IsControlling = !IsControlling;
@@ -1044,12 +1054,12 @@ public class IceAgent : IIceAgent
 
     private async Task RunConsentFreshnessAsync(CancellationToken cancellationToken)
     {
-        DateTime lastSuccess = DateTime.UtcNow;
+        DateTimeOffset lastSuccess = _timeProvider.GetUtcNow();
         try
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                await Task.Delay(ConsentInterval, cancellationToken).ConfigureAwait(false);
+                await Task.Delay(ConsentInterval, _timeProvider, cancellationToken).ConfigureAwait(false);
 
                 if (_selectedTransport == null || _selectedRemoteCandidate == null)
                 {
@@ -1060,17 +1070,17 @@ public class IceAgent : IIceAgent
                 bool success = false;
                 if (remoteEp != null)
                 {
-                    var response = await SendStunBindingRequestAsync(_selectedTransport, remoteEp).ConfigureAwait(false);
+                    var response = await SendStunBindingRequestAsync(_selectedTransport, remoteEp, cancellationToken: cancellationToken).ConfigureAwait(false);
                     success = response?.Type == StunMessageType.BindingSuccessResponse || IsRoleConflictResponse(response);
                 }
 
                 if (success)
                 {
-                    lastSuccess = DateTime.UtcNow;
+                    lastSuccess = _timeProvider.GetUtcNow();
                     continue;
                 }
 
-                if (DateTime.UtcNow - lastSuccess >= ConsentTimeout)
+                if (_timeProvider.GetUtcNow() - lastSuccess >= ConsentTimeout)
                 {
                     ResetSelectedPair();
                     State = IceState.Disconnected;

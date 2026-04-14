@@ -3,14 +3,14 @@ namespace RtcForge.Sctp;
 internal class SctpOutboundChunk
 {
     public SctpDataChunk Chunk { get; }
-    public DateTime SentTime { get; set; }
+    public DateTimeOffset SentTime { get; set; }
     public int Retransmissions { get; set; }
     public bool Acked { get; set; }
 
-    public SctpOutboundChunk(SctpDataChunk chunk)
+    public SctpOutboundChunk(SctpDataChunk chunk, DateTimeOffset sentTime)
     {
         Chunk = chunk;
-        SentTime = DateTime.UtcNow;
+        SentTime = sentTime;
     }
 }
 
@@ -27,14 +27,15 @@ public partial class SctpAssociation
 
     private async Task CheckRetransmissionsAsync()
     {
-        while (_state != SctpAssociationState.Closed)
+        while (_state != SctpAssociationState.Closed && !_cts.IsCancellationRequested)
         {
-            await Task.Delay(100);
+            try { await Task.Delay(TimeSpan.FromMilliseconds(100), _timeProvider, _cts.Token); }
+            catch (OperationCanceledException) { return; }
             List<SctpOutboundChunk> toRetransmit = new();
 
             lock (_outboundLock)
             {
-                var now = DateTime.UtcNow;
+                var now = _timeProvider.GetUtcNow();
                 foreach (var item in _outboundQueue.Values.Where(v => !v.Acked))
                 {
                     if ((now - item.SentTime).TotalMilliseconds > _rto)
@@ -47,7 +48,7 @@ public partial class SctpAssociation
             foreach (var item in toRetransmit)
             {
                 item.Retransmissions++;
-                item.SentTime = DateTime.UtcNow;
+                item.SentTime = _timeProvider.GetUtcNow();
 
                 // Congestion Control on timeout
                 _ssthresh = Math.Max(_cwnd / 2, 2 * 1200);
@@ -100,14 +101,14 @@ public partial class SctpAssociation
         _state = SctpAssociationState.ShutdownPending;
 
         // Wait for outbound queue to clear
-        while (true)
+        while (!_cts.IsCancellationRequested)
         {
             lock (_outboundLock) { if (_outboundQueue.Count == 0)
                 {
                     break;
                 }
             }
-            await Task.Delay(100);
+            await Task.Delay(TimeSpan.FromMilliseconds(100), _timeProvider, _cts.Token);
         }
 
         _state = SctpAssociationState.ShutdownSent;

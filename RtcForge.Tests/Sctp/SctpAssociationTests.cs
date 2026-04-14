@@ -12,12 +12,12 @@ public class SctpAssociationTests
         SctpAssociation peerB = null!;
 
         peerA = new SctpAssociation(5000, 5000, async (data) => {
-            await Task.Delay(1); // Simulate network
+            await Task.Delay(TimeSpan.FromMilliseconds(1), TimeProvider.System); // Simulate network
             await peerB.HandlePacketAsync(data);
         });
 
         peerB = new SctpAssociation(5000, 5000, async (data) => {
-            await Task.Delay(1);
+            await Task.Delay(TimeSpan.FromMilliseconds(1), TimeProvider.System);
             await peerA.HandlePacketAsync(data);
         });
 
@@ -33,7 +33,7 @@ public class SctpAssociationTests
                 break;
             }
 
-            await Task.Delay(10);
+            await Task.Delay(TimeSpan.FromMilliseconds(10), TimeProvider.System);
         }
 
         // Assert

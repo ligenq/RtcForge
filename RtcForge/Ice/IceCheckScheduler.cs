@@ -27,13 +27,13 @@ public class IceCheckScheduler
 {
     private readonly List<IceCandidatePair> _pairs = new();
     private readonly IIceAgent _agent;
-    private readonly Timer _timer;
+    private readonly ITimer _timer;
     private int _currentIndex = 0;
 
-    public IceCheckScheduler(IIceAgent agent)
+    public IceCheckScheduler(IIceAgent agent, TimeProvider? timeProvider = null)
     {
         _agent = agent;
-        _timer = new Timer(OnTimer, null, Timeout.Infinite, Timeout.Infinite);
+        _timer = (timeProvider ?? TimeProvider.System).CreateTimer(OnTimer, null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
     }
 
     public void AddPair(IceCandidatePair pair)
@@ -44,14 +44,14 @@ public class IceCheckScheduler
 
     public void Start()
     {
-        _timer.Change(0, 20); // 20ms Ta interval (default)
+        _timer.Change(TimeSpan.Zero, TimeSpan.FromMilliseconds(20)); // 20ms Ta interval (default)
     }
 
     private void OnTimer(object? state)
     {
         if (_currentIndex >= _pairs.Count)
         {
-            _timer.Change(Timeout.Infinite, Timeout.Infinite);
+            _timer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
             return;
         }
 

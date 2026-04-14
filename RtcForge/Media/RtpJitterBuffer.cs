@@ -11,15 +11,17 @@ public class RtpJitterBuffer
     private readonly int _maxPackets;
     private ushort? _lastPoppedSeq;
     private readonly object _lock = new();
-    private DateTime? _waitingSince;
+    private DateTimeOffset? _waitingSince;
     private readonly TimeSpan _maxWaitTime;
+    private readonly TimeProvider _timeProvider;
 
     public int Count { get { lock (_lock) { return _buffer.Count; } } }
 
-    public RtpJitterBuffer(int maxPackets = 50, int maxWaitTimeMs = 100)
+    public RtpJitterBuffer(int maxPackets = 50, int maxWaitTimeMs = 100, TimeProvider? timeProvider = null)
     {
         _maxPackets = maxPackets;
         _maxWaitTime = TimeSpan.FromMilliseconds(maxWaitTimeMs);
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public void Push(RtpPacket packet)
@@ -74,9 +76,9 @@ public class RtpJitterBuffer
 
             if (_waitingSince == null)
             {
-                _waitingSince = DateTime.UtcNow;
+                _waitingSince = _timeProvider.GetUtcNow();
             }
-            else if (DateTime.UtcNow - _waitingSince.Value > _maxWaitTime)
+            else if (_timeProvider.GetUtcNow() - _waitingSince.Value > _maxWaitTime)
             {
                 // Timeout reached, skip missing packets and yield the next available one
                 ushort firstKey = _buffer.Keys.First();

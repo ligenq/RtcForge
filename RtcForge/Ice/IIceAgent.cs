@@ -27,5 +27,5 @@ public interface IIceAgent : IDisposable
     void AddRemoteCandidate(IceCandidate candidate);
     void SetRemoteCredentials(string ufrag, string password);
     void SetIceServers(IEnumerable<RTCIceServer> servers);
-    Task<bool> ConnectAsync();
+    Task<bool> ConnectAsync(CancellationToken cancellationToken = default);
 }

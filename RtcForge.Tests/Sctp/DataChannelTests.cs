@@ -26,7 +26,7 @@ public class DataChannelTests
         // Wait for handshake
         for (int i = 0; i < 100 && assocA.State != SctpAssociationState.Established; i++)
         {
-            await Task.Delay(10);
+            await Task.Delay(TimeSpan.FromMilliseconds(10), TimeProvider.System);
         }
 
         dcA.SetOpen();
@@ -41,7 +41,7 @@ public class DataChannelTests
         // Wait for message
         for (int i = 0; i < 100 && receivedMessage == null; i++)
         {
-            await Task.Delay(10);
+            await Task.Delay(TimeSpan.FromMilliseconds(10), TimeProvider.System);
         }
 
         // Assert

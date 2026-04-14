@@ -10,6 +10,7 @@ internal sealed class TurnAllocation : IDisposable
     private static readonly TimeSpan MinimumRefreshInterval = TimeSpan.FromSeconds(30);
     private readonly Func<StunMessage, byte[]?, Task<StunMessage?>> _sendRequestAsync;
     private readonly Func<byte[], Task> _sendRawAsync;
+    private readonly TimeProvider _timeProvider;
     private readonly Dictionary<string, TurnPeerBinding> _bindings = new();
     private readonly CancellationTokenSource _cts = new();
     private ushort _nextChannelNumber = InitialChannelNumber;
@@ -23,7 +24,8 @@ internal sealed class TurnAllocation : IDisposable
         byte[] integrityKey,
         TimeSpan allocationLifetime,
         Func<StunMessage, byte[]?, Task<StunMessage?>> sendRequestAsync,
-        Func<byte[], Task> sendRawAsync)
+        Func<byte[], Task> sendRawAsync,
+        TimeProvider? timeProvider = null)
     {
         ServerEndPoint = serverEndPoint;
         RelayedEndPoint = relayedEndPoint;
@@ -34,6 +36,7 @@ internal sealed class TurnAllocation : IDisposable
         AllocationLifetime = allocationLifetime;
         _sendRequestAsync = sendRequestAsync;
         _sendRawAsync = sendRawAsync;
+        _timeProvider = timeProvider ?? TimeProvider.System;
         Task.Run(() => RunRefreshLoopAsync(_cts.Token)).FireAndForget();
     }
 
@@ -310,7 +313,7 @@ internal sealed class TurnAllocation : IDisposable
             while (!cancellationToken.IsCancellationRequested)
             {
                 var delay = TimeSpan.FromSeconds(Math.Max(MinimumRefreshInterval.TotalSeconds, AllocationLifetime.TotalSeconds / 2));
-                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+                await Task.Delay(delay, _timeProvider, cancellationToken).ConfigureAwait(false);
                 await RefreshAllocationAsync(cancellationToken).ConfigureAwait(false);
             }
         }

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Threading.Channels;
 using Org.BouncyCastle.Tls;
 
@@ -5,18 +6,20 @@ namespace RtcForge.Dtls;
 
 internal sealed class BouncyCastleDatagramTransport : DatagramTransport
 {
-    private readonly Channel<byte[]> _receiveChannel;
+    private readonly BlockingCollection<byte[]> _receiveQueue = new();
+    private readonly Channel<byte[]> _sendChannel = Channel.CreateUnbounded<byte[]>();
     private readonly Func<byte[], Task> _sendFunc;
+    private readonly Task _sendLoop;
 
     public BouncyCastleDatagramTransport(Func<byte[], Task> sendFunc)
     {
         _sendFunc = sendFunc;
-        _receiveChannel = Channel.CreateUnbounded<byte[]>();
+        _sendLoop = Task.Run(ProcessSendsAsync);
     }
 
     public void PushReceivedData(byte[] data)
     {
-        _receiveChannel.Writer.TryWrite(data);
+        _receiveQueue.TryAdd(data);
     }
 
     public int GetReceiveLimit() => 1500;
@@ -31,7 +34,7 @@ internal sealed class BouncyCastleDatagramTransport : DatagramTransport
     {
         try
         {
-            if (_receiveChannel.Reader.TryRead(out var data))
+            if (_receiveQueue.TryTake(out var data))
             {
                 int bytesToCopy = Math.Min(buffer.Length, data.Length);
                 data.AsSpan(0, bytesToCopy).CopyTo(buffer);
@@ -40,15 +43,11 @@ internal sealed class BouncyCastleDatagramTransport : DatagramTransport
 
             if (waitMillis > 0)
             {
-                using var cts = new CancellationTokenSource(waitMillis);
-                if (_receiveChannel.Reader.WaitToReadAsync(cts.Token).AsTask().GetAwaiter().GetResult())
+                if (_receiveQueue.TryTake(out data, waitMillis))
                 {
-                    if (_receiveChannel.Reader.TryRead(out data))
-                    {
-                        int bytesToCopy = Math.Min(buffer.Length, data.Length);
-                        data.AsSpan(0, bytesToCopy).CopyTo(buffer);
-                        return bytesToCopy;
-                    }
+                    int bytesToCopy = Math.Min(buffer.Length, data.Length);
+                    data.AsSpan(0, bytesToCopy).CopyTo(buffer);
+                    return bytesToCopy;
                 }
             }
             return 0;
@@ -64,11 +63,23 @@ internal sealed class BouncyCastleDatagramTransport : DatagramTransport
 
     public void Send(ReadOnlySpan<byte> buffer)
     {
-        _sendFunc(buffer.ToArray()).GetAwaiter().GetResult();
+        if (!_sendChannel.Writer.TryWrite(buffer.ToArray()))
+        {
+            throw new InvalidOperationException("DTLS transport is closed");
+        }
     }
 
     public void Close()
     {
-        _receiveChannel.Writer.TryComplete();
+        _receiveQueue.CompleteAdding();
+        _sendChannel.Writer.TryComplete();
+    }
+
+    private async Task ProcessSendsAsync()
+    {
+        await foreach (var data in _sendChannel.Reader.ReadAllAsync().ConfigureAwait(false))
+        {
+            await _sendFunc(data).ConfigureAwait(false);
+        }
     }
 }

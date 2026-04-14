@@ -88,7 +88,7 @@ public class RtpJitterBufferTests
         var packet = buffer.Pop();
         Assert.Null(packet); // Initially null, waiting
         
-        await Task.Delay(50); // wait for timeout
+        await Task.Delay(TimeSpan.FromMilliseconds(50), TimeProvider.System); // wait for timeout
         
         packet = buffer.Pop();
         Assert.NotNull(packet);

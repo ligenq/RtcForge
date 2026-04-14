@@ -35,7 +35,7 @@ public class PeerConnectionTransportTests
                 break;
             }
 
-            await Task.Delay(10);
+            await Task.Delay(TimeSpan.FromMilliseconds(10), TimeProvider.System);
         }
 
         Assert.Equal(SctpAssociationState.Established, assocA.State);
@@ -51,7 +51,7 @@ public class PeerConnectionTransportTests
 
         for (int i = 0; i < 100 && receivedMessage == null; i++)
         {
-            await Task.Delay(10);
+            await Task.Delay(TimeSpan.FromMilliseconds(10), TimeProvider.System);
         }
 
         Assert.Equal("hello over dtls", receivedMessage);

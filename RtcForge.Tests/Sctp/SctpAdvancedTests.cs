@@ -20,7 +20,7 @@ public class SctpShutdownTests
         // Wait for establishment
         for (int i = 0; i < 50 && peerA.State != SctpAssociationState.Established; i++)
         {
-            await Task.Delay(50);
+            await Task.Delay(TimeSpan.FromMilliseconds(50), TimeProvider.System);
         }
 
         Assert.Equal(SctpAssociationState.Established, peerA.State);
@@ -31,7 +31,7 @@ public class SctpShutdownTests
         // Wait for shutdown handshake
         for (int i = 0; i < 50 && peerA.State != SctpAssociationState.Closed; i++)
         {
-            await Task.Delay(50);
+            await Task.Delay(TimeSpan.FromMilliseconds(50), TimeProvider.System);
         }
 
         // Assert

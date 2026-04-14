@@ -25,8 +25,9 @@ public class DtlsCertificate
         Fingerprint = fingerprint;
     }
 
-    public static DtlsCertificate Generate()
+    public static DtlsCertificate Generate(TimeProvider? timeProvider = null)
     {
+        var now = (timeProvider ?? TimeProvider.System).GetUtcNow().UtcDateTime;
         var crypto = new BcTlsCrypto(new SecureRandom());
         var random = new SecureRandom();
         var kpGen = new ECKeyPairGenerator();
@@ -38,8 +39,8 @@ public class DtlsCertificate
         gen.SetSerialNumber(serialNumber);
         gen.SetSubjectDN(new X509Name("CN=RtcForge"));
         gen.SetIssuerDN(new X509Name("CN=RtcForge"));
-        gen.SetNotBefore(DateTime.UtcNow.AddDays(-1));
-        gen.SetNotAfter(DateTime.UtcNow.AddYears(10));
+        gen.SetNotBefore(now.AddDays(-1));
+        gen.SetNotAfter(now.AddYears(10));
         gen.SetPublicKey(kp.Public);
 
         var signatureFactory = new Asn1SignatureFactory("SHA256WithECDSA", kp.Private, random);

@@ -7,6 +7,7 @@ public class RTCConfiguration
     public List<RTCIceServer> IceServers { get; set; } = new();
     public RTCIceTransportPolicy IceTransportPolicy { get; set; } = RTCIceTransportPolicy.All;
     public ILoggerFactory? LoggerFactory { get; set; }
+    public TimeProvider? TimeProvider { get; set; }
 }
 
 public class RTCIceServer

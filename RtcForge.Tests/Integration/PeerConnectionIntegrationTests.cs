@@ -190,7 +190,7 @@ public class PeerConnectionIntegrationTests
         handleIceStateChange.Invoke(pc, new object[] { iceAgent, IceState.Connected });
 
         // Wait a bit for InitializeDtlsAsync to run (it's FireAndForget)
-        await Task.Delay(100);
+        await Task.Delay(TimeSpan.FromMilliseconds(100), TimeProvider.System);
 
         var udpPacket = new UdpPacket
         {

@@ -29,7 +29,7 @@ public class DtlsHandshakeTests
 
         // Start server first, then client
         var serverTask = server.StartAsync(isClient: false);
-        await Task.Delay(100); // Let server start listening
+        await Task.Delay(TimeSpan.FromMilliseconds(100), TimeProvider.System); // Let server start listening
         var clientTask = client.StartAsync(isClient: true);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));

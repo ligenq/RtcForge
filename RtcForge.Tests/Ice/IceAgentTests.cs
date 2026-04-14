@@ -229,7 +229,7 @@ public class IceAgentTests
 
         for (int i = 0; i < 20 && !stateTransitions.Contains(IceState.Checking); i++)
         {
-            await Task.Delay(100);
+            await Task.Delay(TimeSpan.FromMilliseconds(100), TimeProvider.System);
         }
 
         Assert.Contains(IceState.Checking, stateTransitions);

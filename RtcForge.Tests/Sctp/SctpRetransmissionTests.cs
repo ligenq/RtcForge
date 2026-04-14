@@ -32,7 +32,7 @@ public class SctpRetransmissionTests
         Assert.Equal(1, sendCount);
 
         // Wait for more than RTO
-        await Task.Delay(500);
+        await Task.Delay(TimeSpan.FromMilliseconds(500), TimeProvider.System);
 
         // Assert: sendCount should have increased due to retransmission
         Assert.True(sendCount > 1, $"Packet should have been retransmitted. Count: {sendCount}");
@@ -64,7 +64,7 @@ public class SctpRetransmissionTests
         await assoc.HandlePacketAsync(sackBuffer);
 
         // Wait for process loop
-        await Task.Delay(100);
+        await Task.Delay(TimeSpan.FromMilliseconds(100), TimeProvider.System);
 
         // Assert
         Assert.Empty(outboundQueue);

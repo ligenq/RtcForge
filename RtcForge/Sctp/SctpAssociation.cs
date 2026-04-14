@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 
@@ -17,7 +18,7 @@ public enum SctpAssociationState
 
 public partial class SctpAssociation : IDisposable
 {
-    private SctpAssociationState _state = SctpAssociationState.Closed;
+    private volatile SctpAssociationState _state = SctpAssociationState.Closed;
     private readonly ushort _sourcePort;
     private readonly ushort _destinationPort;
     private uint _myVerificationTag;
@@ -26,23 +27,29 @@ public partial class SctpAssociation : IDisposable
     private uint _peerInitialTsn;
     private uint _myTsn;
     private uint _cumulativeTsnAckPoint;
+    private readonly object _tsnLock = new();
 
-    private readonly Channel<SctpPacket> _inputChannel = Channel.CreateUnbounded<SctpPacket>();
+    private readonly Channel<SctpPacket> _inputChannel = Channel.CreateBounded<SctpPacket>(
+        new BoundedChannelOptions(1024) { FullMode = BoundedChannelFullMode.Wait });
     private readonly Func<byte[], Task> _sendFunc;
-    private readonly Dictionary<ushort, RTCDataChannel> _dataChannels = new();
-    private readonly Dictionary<ushort, SctpStream> _streams = new();
+    private readonly ConcurrentDictionary<ushort, RTCDataChannel> _dataChannels = new();
+    private readonly ConcurrentDictionary<ushort, SctpStream> _streams = new();
+    private readonly object _receiveLock = new();
     private readonly SortedSet<uint> _receivedTsns = new();
-    private readonly Dictionary<ushort, ushort> _outboundSsns = new();
+    private readonly ConcurrentDictionary<ushort, ushort> _outboundSsns = new();
+    private readonly CancellationTokenSource _cts = new();
+    private readonly TimeProvider _timeProvider;
 
     private readonly Microsoft.Extensions.Logging.ILoggerFactory? _loggerFactory;
     private readonly Microsoft.Extensions.Logging.ILogger<SctpAssociation>? _logger;
 
     public SctpAssociationState State => _state;
 
-    public SctpAssociation(ushort sourcePort, ushort destinationPort, Func<byte[], Task> sendFunc, Microsoft.Extensions.Logging.ILoggerFactory? loggerFactory = null)
+    public SctpAssociation(ushort sourcePort, ushort destinationPort, Func<byte[], Task> sendFunc, Microsoft.Extensions.Logging.ILoggerFactory? loggerFactory = null, TimeProvider? timeProvider = null)
     {
         _loggerFactory = loggerFactory;
         _logger = loggerFactory?.CreateLogger<SctpAssociation>();
+        _timeProvider = timeProvider ?? TimeProvider.System;
         _sourcePort = sourcePort;
         _destinationPort = destinationPort;
         _sendFunc = sendFunc;
@@ -55,8 +62,8 @@ public partial class SctpAssociation : IDisposable
 
     internal void RegisterDataChannel(RTCDataChannel channel)
     {
-        _dataChannels[channel.Id] = channel;
-        _streams[channel.Id] = new SctpStream(channel.Id, channel.HandleIncomingData);
+        _dataChannels.AddOrUpdate(channel.Id, channel, (_, _) => channel);
+        _streams.AddOrUpdate(channel.Id, new SctpStream(channel.Id, channel.HandleIncomingData), (_, _) => new SctpStream(channel.Id, channel.HandleIncomingData));
     }
 
     public async Task StartAsync(bool isClient)
@@ -67,9 +74,11 @@ public partial class SctpAssociation : IDisposable
             _state = SctpAssociationState.CookieWait;
         }
 
-        Task.Run(ProcessPacketsAsync).FireAndForget();
-        Task.Run(CheckRetransmissionsAsync).FireAndForget();
+        Task.Run(() => ProcessPacketsAsync(), _cts.Token).FireAndForget();
+        Task.Run(() => CheckRetransmissionsAsync(), _cts.Token).FireAndForget();
     }
+
+    public const int MaxMessageSize = 262144;
 
     public async Task SendDataAsync(ushort streamId, uint ppid, byte[] data)
     {
@@ -78,10 +87,19 @@ public partial class SctpAssociation : IDisposable
             throw new InvalidOperationException("Association not established");
         }
 
+        if (data.Length > MaxMessageSize)
+        {
+            throw new ArgumentException($"Message size {data.Length} exceeds maximum {MaxMessageSize}.", nameof(data));
+        }
+
         const int maxChunkSize = 1200;
         int offset = 0;
-        ushort ssn = _outboundSsns.TryGetValue(streamId, out var currentSsn) ? currentSsn : (ushort)0;
-        _outboundSsns[streamId] = (ushort)(ssn + 1);
+        ushort ssn;
+        lock (_tsnLock)
+        {
+            _outboundSsns.TryGetValue(streamId, out ssn);
+            _outboundSsns[streamId] = (ushort)(ssn + 1);
+        }
 
         while (offset < data.Length)
         {
@@ -101,10 +119,13 @@ public partial class SctpAssociation : IDisposable
                 flags |= 0x01;
             }
 
+            uint tsn;
+            lock (_tsnLock) { tsn = _myTsn++; }
+
             var chunk = new SctpDataChunk
             {
                 Flags = flags,
-                Tsn = _myTsn++,
+                Tsn = tsn,
                 StreamId = streamId,
                 StreamSequenceNumber = ssn,
                 PayloadProtocolId = ppid,
@@ -113,7 +134,7 @@ public partial class SctpAssociation : IDisposable
 
             lock (_outboundLock)
             {
-                _outboundQueue[chunk.Tsn] = new SctpOutboundChunk(chunk);
+                _outboundQueue[chunk.Tsn] = new SctpOutboundChunk(chunk, _timeProvider.GetUtcNow());
                 _outstandingBytes += (uint)chunk.GetSerializedLength();
             }
 
@@ -134,7 +155,7 @@ public partial class SctpAssociation : IDisposable
     {
         try
         {
-            while (await _inputChannel.Reader.WaitToReadAsync())
+            while (await _inputChannel.Reader.WaitToReadAsync(_cts.Token))
             {
                 while (_inputChannel.Reader.TryRead(out var packet))
                 {
@@ -142,6 +163,7 @@ public partial class SctpAssociation : IDisposable
                 }
             }
         }
+        catch (OperationCanceledException) { }
         catch (Exception ex)
         {
             _logger?.LogError(ex, "SCTP association packet processing failed");
@@ -172,29 +194,33 @@ public partial class SctpAssociation : IDisposable
 
     private async Task HandleDataChunk(SctpDataChunk data)
     {
-        if (!_receivedTsns.Contains(data.Tsn))
+        bool isNew;
+        lock (_receiveLock)
         {
-            _receivedTsns.Add(data.Tsn);
-            while (_receivedTsns.Contains(_peerInitialTsn))
+            isNew = _receivedTsns.Add(data.Tsn);
+            if (isNew)
             {
-                _cumulativeTsnAckPoint = _peerInitialTsn;
-                _peerInitialTsn++;
+                while (_receivedTsns.Contains(_peerInitialTsn))
+                {
+                    _cumulativeTsnAckPoint = _peerInitialTsn;
+                    _peerInitialTsn++;
+                }
             }
+        }
 
-            if (!_streams.TryGetValue(data.StreamId, out var stream))
+        if (isNew)
+        {
+            var stream = _streams.GetOrAdd(data.StreamId, id => new SctpStream(id, (ppid, msg) =>
             {
-                stream = new SctpStream(data.StreamId, (ppid, msg) => {
-                    if (_dataChannels.TryGetValue(data.StreamId, out var channel))
-                    {
-                        channel.HandleIncomingData(ppid, msg);
-                    }
-                    else if (ppid == 50)
-                    {
-                        HandleDcepMessage(data.StreamId, msg);
-                    }
-                });
-                _streams[data.StreamId] = stream;
-            }
+                if (_dataChannels.TryGetValue(id, out var channel))
+                {
+                    channel.HandleIncomingData(ppid, msg);
+                }
+                else if (ppid == 50)
+                {
+                    HandleDcepMessage(id, msg);
+                }
+            }));
             stream.HandleChunk(data);
         }
         await SendSackAsync();
@@ -222,6 +248,7 @@ public partial class SctpAssociation : IDisposable
         }
     }
 
+
     private void HandleSackChunk(SctpSackChunk sack)
     {
         lock (_outboundLock)
@@ -231,7 +258,7 @@ public partial class SctpAssociation : IDisposable
             {
                 if (_outboundQueue.TryGetValue(tsn, out var item))
                 {
-                    int rtt = (int)(DateTime.UtcNow - item.SentTime).TotalMilliseconds;
+                    int rtt = (int)(_timeProvider.GetUtcNow() - item.SentTime).TotalMilliseconds;
                     UpdateRto(rtt);
                     _outstandingBytes -= (uint)item.Chunk.GetSerializedLength();
                     _outboundQueue.Remove(tsn);
@@ -308,10 +335,12 @@ public partial class SctpAssociation : IDisposable
     public void Dispose()
     {
         _state = SctpAssociationState.Closed;
+        _cts.Cancel();
         _inputChannel.Writer.TryComplete();
         foreach (var channel in _dataChannels.Values)
         {
             channel.SetClosed();
         }
+        _cts.Dispose();
     }
 }

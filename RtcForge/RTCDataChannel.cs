@@ -40,7 +40,13 @@ public class RTCDataChannel
             throw new InvalidOperationException("DataChannel not open");
         }
 
-        await _association.SendDataAsync(Id, 51, System.Text.Encoding.UTF8.GetBytes(data));
+        var bytes = System.Text.Encoding.UTF8.GetBytes(data);
+        if (bytes.Length > Sctp.SctpAssociation.MaxMessageSize)
+        {
+            throw new ArgumentException($"Message size {bytes.Length} exceeds maximum {Sctp.SctpAssociation.MaxMessageSize}.", nameof(data));
+        }
+
+        await _association.SendDataAsync(Id, 51, bytes);
     }
 
     public async Task SendAsync(byte[] data)
@@ -48,6 +54,11 @@ public class RTCDataChannel
         if (ReadyState != RTCDataChannelState.Open || _association == null)
         {
             throw new InvalidOperationException("DataChannel not open");
+        }
+
+        if (data.Length > Sctp.SctpAssociation.MaxMessageSize)
+        {
+            throw new ArgumentException($"Message size {data.Length} exceeds maximum {Sctp.SctpAssociation.MaxMessageSize}.", nameof(data));
         }
 
         await _association.SendDataAsync(Id, 53, data);

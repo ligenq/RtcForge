@@ -99,13 +99,12 @@ public sealed class WebRtcConnection : IWebRtcConnection
     public Task<bool> ConnectAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return _peerConnection.ConnectAsync();
+        return _peerConnection.ConnectAsync(cancellationToken);
     }
 
     public ValueTask DisposeAsync()
     {
-        _peerConnection.Dispose();
-        return ValueTask.CompletedTask;
+        return _peerConnection.DisposeAsync();
     }
 }
 
@@ -138,7 +137,9 @@ public sealed class WebRtcDataChannel : IWebRtcDataChannel
 internal sealed class WebRtcDataChannelStream : Stream
 {
     private readonly IWebRtcDataChannel _channel;
-    private readonly System.Threading.Channels.Channel<byte[]> _incomingFrames = System.Threading.Channels.Channel.CreateUnbounded<byte[]>();
+    private readonly Queue<byte[]> _incomingFrames = new();
+    private readonly SemaphoreSlim _availableFrames = new(0);
+    private readonly object _incomingFrameLock = new();
     private byte[]? _currentBuffer;
     private int _currentOffset;
     private bool _disposed;
@@ -167,7 +168,27 @@ internal sealed class WebRtcDataChannelStream : Stream
 
     public override int Read(byte[] buffer, int offset, int count)
     {
-        return ReadAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        while (true)
+        {
+            if (TryReadCurrentBuffer(buffer.AsMemory(offset, count), out int bytesRead))
+            {
+                return bytesRead;
+            }
+
+            _availableFrames.Wait();
+            if (_disposed)
+            {
+                throw new ObjectDisposedException(GetType().FullName);
+            }
+
+            if (TryDequeueFrame(out var next))
+            {
+                _currentBuffer = next;
+                _currentOffset = 0;
+            }
+        }
     }
 
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
@@ -176,27 +197,15 @@ internal sealed class WebRtcDataChannelStream : Stream
 
         while (true)
         {
-            if (_currentBuffer != null)
+            if (TryReadCurrentBuffer(buffer, out int bytesRead))
             {
-                int remaining = _currentBuffer.Length - _currentOffset;
-                int toCopy = Math.Min(remaining, buffer.Length);
-                _currentBuffer.AsMemory(_currentOffset, toCopy).CopyTo(buffer);
-                _currentOffset += toCopy;
-                if (_currentOffset >= _currentBuffer.Length)
-                {
-                    _currentBuffer = null;
-                    _currentOffset = 0;
-                }
-
-                return toCopy;
+                return bytesRead;
             }
 
-            if (!await _incomingFrames.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
-            {
-                return 0;
-            }
+            await _availableFrames.WaitAsync(cancellationToken).ConfigureAwait(false);
+            ObjectDisposedException.ThrowIf(_disposed, this);
 
-            if (_incomingFrames.Reader.TryRead(out var next))
+            if (TryDequeueFrame(out var next))
             {
                 _currentBuffer = next;
                 _currentOffset = 0;
@@ -209,7 +218,7 @@ internal sealed class WebRtcDataChannelStream : Stream
 
     public override void Write(byte[] buffer, int offset, int count)
     {
-        WriteAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
+        throw new NotSupportedException("Synchronous writes are not supported. Use WriteAsync instead.");
     }
 
     public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
@@ -232,7 +241,7 @@ internal sealed class WebRtcDataChannelStream : Stream
         if (!_disposed)
         {
             _disposed = true;
-            _incomingFrames.Writer.TryComplete();
+            _availableFrames.Release();
         }
 
         base.Dispose(disposing);
@@ -243,7 +252,7 @@ internal sealed class WebRtcDataChannelStream : Stream
         if (!_disposed)
         {
             _disposed = true;
-            _incomingFrames.Writer.TryComplete();
+            _availableFrames.Release();
         }
 
         await base.DisposeAsync().ConfigureAwait(false);
@@ -262,6 +271,53 @@ internal sealed class WebRtcDataChannelStream : Stream
             return;
         }
 
-        _incomingFrames.Writer.TryWrite(data.Slice(sizeof(int), payloadLength).ToArray());
+        try
+        {
+            EnqueueFrame(data.Slice(sizeof(int), payloadLength).ToArray());
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+    }
+
+    private bool TryReadCurrentBuffer(Memory<byte> buffer, out int bytesRead)
+    {
+        bytesRead = 0;
+        if (_currentBuffer == null)
+        {
+            return false;
+        }
+
+        int remaining = _currentBuffer.Length - _currentOffset;
+        int toCopy = Math.Min(remaining, buffer.Length);
+        _currentBuffer.AsMemory(_currentOffset, toCopy).CopyTo(buffer);
+        _currentOffset += toCopy;
+        if (_currentOffset >= _currentBuffer.Length)
+        {
+            _currentBuffer = null;
+            _currentOffset = 0;
+        }
+
+        bytesRead = toCopy;
+        return true;
+    }
+
+    private void EnqueueFrame(byte[] frame)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        lock (_incomingFrameLock)
+        {
+            _incomingFrames.Enqueue(frame);
+            _availableFrames.Release();
+        }
+    }
+
+    private bool TryDequeueFrame(out byte[]? frame)
+    {
+        lock (_incomingFrameLock)
+        {
+            return _incomingFrames.TryDequeue(out frame);
+        }
     }
 }
