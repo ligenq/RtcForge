@@ -19,11 +19,7 @@ public class IceAgent : IIceAgent
         "1",
         StringComparison.Ordinal);
     private IceState _state = IceState.New;
-#if NET9_0_OR_GREATER
     private readonly Lock _candidateLock = new();
-#else
-    private readonly object _candidateLock = new();
-#endif
     private readonly List<IceCandidate> _localCandidates = [];
     private readonly List<IceCandidate> _remoteCandidates = [];
     private readonly List<IceUdpTransport> _transports = [];

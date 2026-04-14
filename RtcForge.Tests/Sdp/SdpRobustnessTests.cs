@@ -7,7 +7,7 @@ public class SdpRobustnessTests
     [Fact]
     public void TryParse_ValidSdp_ReturnsTrue()
     {
-        string sdp = "v=0\r\no=- 123 456 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\n";
+        const string sdp = "v=0\r\no=- 123 456 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\n";
 
         bool result = SdpMessage.TryParse(sdp, out var message);
 
@@ -29,7 +29,7 @@ public class SdpRobustnessTests
     [Fact]
     public void TryParse_MalformedOrigin_TooFewFields_ReturnsFalse()
     {
-        string sdp = "v=0\r\no=- 123\r\ns=-\r\nt=0 0\r\n";
+        const string sdp = "v=0\r\no=- 123\r\ns=-\r\nt=0 0\r\n";
 
         bool result = SdpMessage.TryParse(sdp, out var message);
 
@@ -40,7 +40,7 @@ public class SdpRobustnessTests
     [Fact]
     public void TryParse_MalformedOrigin_NonNumericSessionId_ReturnsFalse()
     {
-        string sdp = "v=0\r\no=- abc 456 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n";
+        const string sdp = "v=0\r\no=- abc 456 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n";
 
         bool result = SdpMessage.TryParse(sdp, out var message);
 
@@ -51,7 +51,7 @@ public class SdpRobustnessTests
     [Fact]
     public void TryParse_NonNumericPort_ReturnsFalse()
     {
-        string sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=audio abc UDP/TLS/RTP/SAVPF 111\r\n";
+        const string sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=audio abc UDP/TLS/RTP/SAVPF 111\r\n";
 
         bool result = SdpMessage.TryParse(sdp, out var message);
 
@@ -62,7 +62,7 @@ public class SdpRobustnessTests
     [Fact]
     public void TryParse_NonNumericVersion_ReturnsFalse()
     {
-        string sdp = "v=abc\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n";
+        const string sdp = "v=abc\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n";
 
         bool result = SdpMessage.TryParse(sdp, out var message);
 
@@ -73,7 +73,7 @@ public class SdpRobustnessTests
     [Fact]
     public void TryParse_MalformedTiming_ReturnsFalse()
     {
-        string sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=abc\r\n";
+        const string sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=abc\r\n";
 
         bool result = SdpMessage.TryParse(sdp, out var message);
 
@@ -83,7 +83,7 @@ public class SdpRobustnessTests
     [Fact]
     public void TryParse_MalformedMediaLine_TooFewParts_ReturnsFalse()
     {
-        string sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=audio 9\r\n";
+        const string sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=audio 9\r\n";
 
         bool result = SdpMessage.TryParse(sdp, out var message);
 
@@ -93,7 +93,7 @@ public class SdpRobustnessTests
     [Fact]
     public void Parse_MalformedSdp_ThrowsFormatException()
     {
-        string sdp = "v=0\r\no=bad\r\n";
+        const string sdp = "v=0\r\no=bad\r\n";
 
         Assert.Throws<FormatException>(() => SdpMessage.Parse(sdp));
     }
@@ -101,7 +101,7 @@ public class SdpRobustnessTests
     [Fact]
     public void Parse_ValidSdp_ReturnsMessage()
     {
-        string sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n";
+        const string sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n";
 
         var message = SdpMessage.Parse(sdp);
 

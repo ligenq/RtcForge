@@ -230,7 +230,7 @@ public class ErrorPropagationTests
         var handleIceStateChange = typeof(RTCPeerConnection)
             .GetMethod("HandleIceStateChange", BindingFlags.Instance | BindingFlags.NonPublic)!;
 
-        handleIceStateChange.Invoke(pc, new object[] { iceAgent, IceState.Disconnected });
+        handleIceStateChange.Invoke(pc, [iceAgent, IceState.Disconnected]);
 
         Assert.Equal(PeerConnectionState.Disconnected, pc.ConnectionState);
         Assert.Contains(PeerConnectionState.Disconnected, states);
@@ -250,7 +250,7 @@ public class ErrorPropagationTests
         var handleIceStateChange = typeof(RTCPeerConnection)
             .GetMethod("HandleIceStateChange", BindingFlags.Instance | BindingFlags.NonPublic)!;
 
-        handleIceStateChange.Invoke(pc, new object[] { iceAgent, IceState.Failed });
+        handleIceStateChange.Invoke(pc, [iceAgent, IceState.Failed]);
 
         Assert.Equal(PeerConnectionState.Failed, pc.ConnectionState);
         Assert.Contains(PeerConnectionState.Failed, states);
@@ -451,7 +451,7 @@ public class HandleIceStateConnectedDtlsErrorTests
 
         var handleIceStateChange = typeof(RTCPeerConnection)
             .GetMethod("HandleIceStateChange", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        handleIceStateChange.Invoke(pc, new object[] { iceAgent, IceState.Connected });
+        handleIceStateChange.Invoke(pc, [iceAgent, IceState.Connected]);
 
         await Task.Delay(TimeSpan.FromMilliseconds(200), TimeProvider.System);
 
@@ -479,7 +479,7 @@ public class HandleIceStateConnectedDtlsErrorTests
         var handleIceStateChange = typeof(RTCPeerConnection)
             .GetMethod("HandleIceStateChange", BindingFlags.Instance | BindingFlags.NonPublic)!;
 
-        handleIceStateChange.Invoke(pc, new object[] { iceAgent, IceState.Checking });
+        handleIceStateChange.Invoke(pc, [iceAgent, IceState.Checking]);
 
         Assert.Equal(PeerConnectionState.Connecting, pc.ConnectionState);
         Assert.Contains(PeerConnectionState.Connecting, states);
@@ -499,7 +499,7 @@ public class HandleIceStateConnectedDtlsErrorTests
         var handleIceStateChange = typeof(RTCPeerConnection)
             .GetMethod("HandleIceStateChange", BindingFlags.Instance | BindingFlags.NonPublic)!;
 
-        handleIceStateChange.Invoke(pc, new object[] { iceAgent, IceState.Closed });
+        handleIceStateChange.Invoke(pc, [iceAgent, IceState.Closed]);
 
         Assert.Equal(PeerConnectionState.Closed, pc.ConnectionState);
         Assert.Contains(PeerConnectionState.Closed, states);

@@ -8,7 +8,7 @@ public class MediaPacketizerTests
     public void OpusPacketizer_ReturnsSinglePacket()
     {
         var packetizer = new OpusPacketizer();
-        ushort sn = 100;
+        const ushort sn = 100;
         var frame = new byte[] { 1, 2, 3, 4 };
 
         var packets = packetizer.Packetize(frame, 1000, 1234, sn).ToList();
@@ -23,7 +23,7 @@ public class MediaPacketizerTests
     public void Vp8Packetizer_FragmentsLargeFrame()
     {
         var packetizer = new Vp8Packetizer();
-        ushort sn = 100;
+        const ushort sn = 100;
         var frame = new byte[2500]; // Should result in 3 packets (1200, 1200, 100)
         new Random().NextBytes(frame);
 

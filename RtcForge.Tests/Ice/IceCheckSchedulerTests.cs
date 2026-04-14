@@ -15,7 +15,7 @@ public class IceCandidatePairTests
         // RFC 8445: priority = min(G,D)*2^32 + 2*max(G,D) + (G>D ? 1 : 0)
         // G=100 (local), D=200 (remote)
         // min=100, max=200 => 100*2^32 + 2*200 + 0 = 429496730000
-        ulong expected = ((ulong)100 << 32) + (2 * (ulong)200) + 0;
+        const ulong expected = ((ulong)100 << 32) + (2 * (ulong)200) + 0;
         Assert.Equal(expected, pair.Priority);
     }
 
@@ -28,7 +28,7 @@ public class IceCandidatePairTests
         var pair = new IceCandidatePair(local, remote);
 
         // G=300 > D=100, so +1
-        ulong expected = ((ulong)100 << 32) + (2 * (ulong)300) + 1;
+        const ulong expected = ((ulong)100 << 32) + (2 * (ulong)300) + 1;
         Assert.Equal(expected, pair.Priority);
     }
 
@@ -40,7 +40,7 @@ public class IceCandidatePairTests
 
         var pair = new IceCandidatePair(local, remote);
 
-        ulong expected = ((ulong)500 << 32) + (2 * (ulong)500) + 0;
+        const ulong expected = ((ulong)500 << 32) + (2 * (ulong)500) + 0;
         Assert.Equal(expected, pair.Priority);
     }
 

@@ -16,7 +16,7 @@ public class RTCRtpSender
     public RTCDtlsTransport? Transport { get; internal set; }
     private readonly Func<RtpPacket, Task> _sendRtpFunc;
     private readonly Dictionary<ushort, RtpPacket> _packetHistory = new();
-    private readonly object _historyLock = new();
+    private readonly Lock _historyLock = new();
 
     public event EventHandler? OnPictureLoss;
 

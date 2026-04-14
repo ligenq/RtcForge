@@ -54,7 +54,7 @@ public class RTCDataChannelTests
     {
         var dc = new RTCDataChannel("test", 1);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => dc.SendAsync(new byte[] { 1, 2 }));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => dc.SendAsync([1, 2]));
     }
 
     [Fact]
@@ -76,7 +76,7 @@ public class RTCDataChannelTests
         byte[]? received = null;
         dc.OnBinaryMessage += (_, data) => received = data;
 
-        dc.HandleIncomingData(53, new byte[] { 0xCA, 0xFE });
+        dc.HandleIncomingData(53, [0xCA, 0xFE]);
 
         Assert.NotNull(received);
         Assert.Equal(new byte[] { 0xCA, 0xFE }, received);
@@ -91,7 +91,7 @@ public class RTCDataChannelTests
         dc.OnMessage += (_, _) => stringFired = true;
         dc.OnBinaryMessage += (_, _) => binaryFired = true;
 
-        dc.HandleIncomingData(99, new byte[] { 1 });
+        dc.HandleIncomingData(99, [1]);
 
         Assert.False(stringFired);
         Assert.False(binaryFired);
@@ -104,6 +104,6 @@ public class RTCDataChannelTests
 
         // Should not throw even with no event subscribers
         dc.HandleIncomingData(51, Encoding.UTF8.GetBytes("test"));
-        dc.HandleIncomingData(53, new byte[] { 1 });
+        dc.HandleIncomingData(53, [1]);
     }
 }

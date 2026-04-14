@@ -170,7 +170,7 @@ public class RtpPacketEdgeCaseTests
             SequenceNumber = 1,
             Timestamp = 100,
             Ssrc = 200,
-            ExtensionHeader = new byte[] { 0xBE, 0xDE, 0x00, 0x01, 0x01, 0x02, 0x03, 0x04 },
+            ExtensionHeader = [0xBE, 0xDE, 0x00, 0x01, 0x01, 0x02, 0x03, 0x04],
             Payload = new byte[] { 0xFF }.AsMemory()
         };
 

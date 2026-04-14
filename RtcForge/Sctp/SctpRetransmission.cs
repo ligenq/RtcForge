@@ -17,7 +17,7 @@ internal class SctpOutboundChunk
 public partial class SctpAssociation
 {
     private readonly Dictionary<uint, SctpOutboundChunk> _outboundQueue = new();
-    private readonly object _outboundLock = new();
+    private readonly Lock _outboundLock = new();
     private int _rto = 1000; // Retransmission Timeout in ms
     private int _srtt = -1;  // Smoothed Round Trip Time
     private int _rttvar = -1; // RTT Variation

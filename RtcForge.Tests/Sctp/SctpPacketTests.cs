@@ -54,7 +54,7 @@ public class SctpPacketTests
             StreamId = 1,
             StreamSequenceNumber = 0,
             PayloadProtocolId = 53,
-            UserData = new byte[] { 0xAA, 0xBB, 0xCC, 0xDD }
+            UserData = [0xAA, 0xBB, 0xCC, 0xDD]
         });
 
         byte[] buffer = new byte[packet.GetSerializedLength()];

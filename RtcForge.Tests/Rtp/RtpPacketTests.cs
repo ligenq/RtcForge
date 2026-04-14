@@ -9,13 +9,25 @@ public class RtpPacketTests
     {
         // Arrange
         // V=2, P=0, X=0, CC=0, M=1, PT=96, SN=123, TS=456, SSRC=789
-        byte[] buffer = new byte[12 + 4]; // 12 bytes header + 4 bytes payload
-        buffer[0] = 0x80; // V=2
-        buffer[1] = 0xE0; // M=1, PT=96 (0x60 | 0x80)
-        buffer[2] = 0x00; buffer[3] = 0x7B; // SN=123
-        buffer[4] = 0x00; buffer[5] = 0x00; buffer[6] = 0x01; buffer[7] = 0xC8; // TS=456
-        buffer[8] = 0x00; buffer[9] = 0x00; buffer[10] = 0x03; buffer[11] = 0x15; // SSRC=789
-        buffer[12] = 0xDE; buffer[13] = 0xAD; buffer[14] = 0xBE; buffer[15] = 0xEF; // Payload
+        byte[] buffer =
+        [
+            0x80, // V=2
+            0xE0, // M=1, PT=96 (0x60 | 0x80)
+            0x00,
+            0x7B, // SN=123
+            0x00,
+            0x00,
+            0x01,
+            0xC8, // TS=456
+            0x00,
+            0x00,
+            0x03,
+            0x15, // SSRC=789
+            0xDE,
+            0xAD,
+            0xBE,
+            0xEF, // Payload
+        ]; // 12 bytes header + 4 bytes payload
 
         // Act
         bool result = RtpPacket.TryParse(buffer, out RtpPacket packet);
@@ -68,14 +80,29 @@ public class RtpPacketTests
     public void TryParse_WithCsrc_ReturnsTrue()
     {
         // Arrange
-        byte[] buffer = new byte[12 + 4 + 4]; // 12 header + 4 CSRC + 4 payload
-        buffer[0] = 0x81; // V=2, CC=1
-        buffer[1] = 0x60; // M=0, PT=96
-        buffer[2] = 0x00; buffer[3] = 0x7B; // SN=123
-        buffer[4] = 0x00; buffer[5] = 0x00; buffer[6] = 0x01; buffer[7] = 0xC8; // TS=456
-        buffer[8] = 0x00; buffer[9] = 0x00; buffer[10] = 0x03; buffer[11] = 0x15; // SSRC=789
-        buffer[12] = 0x00; buffer[13] = 0x00; buffer[14] = 0x04; buffer[15] = 0xD2; // CSRC=1234
-        buffer[16] = 0xAA; buffer[17] = 0xBB; buffer[18] = 0xCC; buffer[19] = 0xDD; // Payload
+        byte[] buffer =
+        [
+            0x81, // V=2, CC=1
+            0x60, // M=0, PT=96
+            0x00,
+            0x7B, // SN=123
+            0x00,
+            0x00,
+            0x01,
+            0xC8, // TS=456
+            0x00,
+            0x00,
+            0x03,
+            0x15, // SSRC=789
+            0x00,
+            0x00,
+            0x04,
+            0xD2, // CSRC=1234
+            0xAA,
+            0xBB,
+            0xCC,
+            0xDD, // Payload
+        ]; // 12 header + 4 CSRC + 4 payload
 
         // Act
         bool result = RtpPacket.TryParse(buffer, out RtpPacket packet);

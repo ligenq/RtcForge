@@ -87,7 +87,7 @@ public class IceAgentTests
         SetPrivateField(agent, "_selectedTransport", transport2);
         SetPrivateField(agent, "_selectedRemoteCandidate", remote2);
 
-        byte[] payload = new byte[] { 1, 2, 3, 4 };
+        byte[] payload = [1, 2, 3, 4];
         await agent.SendDataAsync(payload);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));

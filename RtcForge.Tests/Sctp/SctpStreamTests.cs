@@ -22,7 +22,7 @@ public class SctpStreamTests
             StreamSequenceNumber = 0,
             PayloadProtocolId = 51,
             Flags = 0x03, // B and E
-            UserData = new byte[] { 0x41, 0x42, 0x43 }
+            UserData = [0x41, 0x42, 0x43]
         };
 
         // Act
@@ -46,14 +46,14 @@ public class SctpStreamTests
             Tsn = 100,
             StreamSequenceNumber = 5,
             Flags = 0x02, // B
-            UserData = new byte[] { 1, 2 }
+            UserData = [1, 2]
         };
         var chunk2 = new SctpDataChunk
         {
             Tsn = 101,
             StreamSequenceNumber = 5,
             Flags = 0x01, // E
-            UserData = new byte[] { 3, 4 }
+            UserData = [3, 4]
         };
 
         // Act: Push out of order to verify sorting by TSN

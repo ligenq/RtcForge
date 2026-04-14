@@ -14,8 +14,8 @@ public class SrtpSession
         _profile = keys.ProtectionProfile;
 
         // RFC 5764: client_write_SRTP_master_key | server_write_SRTP_master_key | client_write_SRTP_master_salt | server_write_SRTP_master_salt
-        int keyLen = 16;
-        int saltLen = 14;
+        const int keyLen = 16;
+        const int saltLen = 14;
 
         byte[] ck = new byte[keyLen];
         byte[] sk = new byte[keyLen];

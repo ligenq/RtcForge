@@ -7,20 +7,20 @@ using Org.BouncyCastle.Tls.Crypto.Impl.BC;
 
 namespace RtcForge.Dtls;
 
-public class DtlsTransport : IDtlsTransport
+public sealed class DtlsTransport : IDtlsTransport
 {
     internal static readonly ProtocolVersion[] SupportedDtlsVersions =
-    {
+    [
         ProtocolVersion.DTLSv12
-    };
+    ];
 
     internal static readonly int[] SupportedDtlsCipherSuites =
-    {
+    [
         CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
         CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
         CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
         CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384
-    };
+    ];
 
     private DtlsState _state = DtlsState.New;
     private readonly Func<byte[], Task> _sendFunc;
@@ -28,7 +28,7 @@ public class DtlsTransport : IDtlsTransport
     private BouncyCastleDatagramTransport? _bcTransport;
     private SrtpKeys? _srtpKeys;
     private readonly DtlsCertificate _certificate;
-    private readonly object _sendLock = new();
+    private readonly Lock _sendLock = new();
     private string? _remoteFingerprint;
     private string? _remoteFingerprintAlg;
 
@@ -48,10 +48,10 @@ public class DtlsTransport : IDtlsTransport
     public event EventHandler<DtlsState>? OnStateChange;
     public event EventHandler<byte[]>? OnData;
 
-    private readonly Microsoft.Extensions.Logging.ILoggerFactory? _loggerFactory;
-    private readonly Microsoft.Extensions.Logging.ILogger<DtlsTransport>? _logger;
+    private readonly ILoggerFactory? _loggerFactory;
+    private readonly ILogger<DtlsTransport>? _logger;
 
-    public DtlsTransport(Func<byte[], Task> sendFunc, DtlsCertificate certificate, Microsoft.Extensions.Logging.ILoggerFactory? loggerFactory = null)
+    public DtlsTransport(Func<byte[], Task> sendFunc, DtlsCertificate certificate, ILoggerFactory? loggerFactory = null)
     {
         _loggerFactory = loggerFactory;
         _logger = loggerFactory?.CreateLogger<DtlsTransport>();
@@ -173,7 +173,7 @@ public class DtlsTransport : IDtlsTransport
             return null;
         }
 
-        int totalLen = 2 * (16 + 14);
+        const int totalLen = 2 * (16 + 14);
         byte[] keyingMaterial = context.ExportKeyingMaterial(ExporterLabel.dtls_srtp, null, totalLen);
         return new SrtpKeys
         {
@@ -223,7 +223,7 @@ internal class WebRtcTlsClient : DefaultTlsClient
     public override IDictionary<int, byte[]> GetClientExtensions()
     {
         var extensions = TlsExtensionsUtilities.EnsureExtensionsInitialised(base.GetClientExtensions());
-        TlsSrtpUtilities.AddUseSrtpExtension(extensions, new UseSrtpData(new int[] { SrtpProtectionProfile.SRTP_AES128_CM_HMAC_SHA1_80 }, TlsUtilities.EmptyBytes));
+        TlsSrtpUtilities.AddUseSrtpExtension(extensions, new UseSrtpData([SrtpProtectionProfile.SRTP_AES128_CM_HMAC_SHA1_80], TlsUtilities.EmptyBytes));
         return extensions;
     }
 
@@ -264,7 +264,7 @@ internal class WebRtcTlsClient : DefaultTlsClient
         public TlsCredentials? GetClientCredentials(CertificateRequest certificateRequest)
         {
             short[]? certificateTypes = certificateRequest.CertificateTypes;
-            if (certificateTypes == null || !certificateTypes.Contains(ClientCertificateType.ecdsa_sign))
+            if (certificateTypes?.Contains(ClientCertificateType.ecdsa_sign) != true)
             {
                 return null;
             }
@@ -313,7 +313,7 @@ internal class WebRtcTlsServer : DefaultTlsServer
     public override IDictionary<int, byte[]> GetServerExtensions()
     {
         var extensions = TlsExtensionsUtilities.EnsureExtensionsInitialised(base.GetServerExtensions());
-        TlsSrtpUtilities.AddUseSrtpExtension(extensions, new UseSrtpData(new int[] { SrtpProtectionProfile.SRTP_AES128_CM_HMAC_SHA1_80 }, TlsUtilities.EmptyBytes));
+        TlsSrtpUtilities.AddUseSrtpExtension(extensions, new UseSrtpData([SrtpProtectionProfile.SRTP_AES128_CM_HMAC_SHA1_80], TlsUtilities.EmptyBytes));
         return extensions;
     }
 
@@ -331,7 +331,7 @@ internal class WebRtcTlsServer : DefaultTlsServer
 
     public override CertificateRequest GetCertificateRequest()
     {
-        short[] certificateTypes = new short[] { ClientCertificateType.ecdsa_sign };
+        short[] certificateTypes = [ClientCertificateType.ecdsa_sign];
         IList<SignatureAndHashAlgorithm>? serverSigAlgs = null;
         if (TlsUtilities.IsSignatureAlgorithmsExtensionAllowed(m_context.ServerVersion))
         {
@@ -341,9 +341,9 @@ internal class WebRtcTlsServer : DefaultTlsServer
         return new CertificateRequest(certificateTypes, serverSigAlgs, null);
     }
 
-    public override void NotifyClientCertificate(Org.BouncyCastle.Tls.Certificate clientCertificate)
+    public override void NotifyClientCertificate(Certificate clientCertificate)
     {
-        if (clientCertificate == null || clientCertificate.IsEmpty)
+        if (clientCertificate?.IsEmpty != false)
         {
             throw new TlsFatalAlert(AlertDescription.bad_certificate);
         }

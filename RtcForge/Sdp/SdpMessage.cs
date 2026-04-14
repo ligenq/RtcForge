@@ -34,7 +34,7 @@ public class SdpMessage
     public static bool TryParse(string sdp, out SdpMessage? message)
     {
         message = new SdpMessage();
-        var lines = sdp.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
+        var lines = sdp.Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries);
         SdpMediaDescription? currentMedia = null;
 
         foreach (var line in lines)

@@ -50,7 +50,7 @@ public class SctpRtoTests
         var updateRtoMethod = typeof(SctpAssociation).GetMethod("UpdateRto", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
 
         // Act 1: Initial RTT
-        updateRtoMethod!.Invoke(assoc, new object[] { 200 });
+        updateRtoMethod!.Invoke(assoc, [200]);
         int rto1 = (int)typeof(SctpAssociation).GetField("_rto", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(assoc)!;
 
         // Expected initial: SRTT=200, RTTVAR=100 -> RTO = 200 + 400 = 600. 
@@ -58,7 +58,7 @@ public class SctpRtoTests
         Assert.Equal(1000, rto1);
 
         // Act 2: High RTT
-        updateRtoMethod!.Invoke(assoc, new object[] { 500 });
+        updateRtoMethod!.Invoke(assoc, [500]);
         int rto2 = (int)typeof(SctpAssociation).GetField("_rto", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(assoc)!;
 
         // Expected: SRTT = (0.875 * 200) + (0.125 * 500) = 175 + 62.5 = 237

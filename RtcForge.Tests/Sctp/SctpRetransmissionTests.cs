@@ -48,7 +48,7 @@ public class SctpRetransmissionTests
         typeof(SctpAssociation).GetField("_state", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.SetValue(assoc, SctpAssociationState.Established);
 
         await assoc.StartAsync(false);
-        await assoc.SendDataAsync(1, 51, new byte[] { 1, 2, 3 });
+        await assoc.SendDataAsync(1, 51, [1, 2, 3]);
 
         var outboundQueue = (Dictionary<uint, SctpOutboundChunk>)typeof(SctpAssociation).GetField("_outboundQueue", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(assoc)!;
         Assert.Single(outboundQueue);

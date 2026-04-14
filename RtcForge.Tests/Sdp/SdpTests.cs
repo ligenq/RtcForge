@@ -8,7 +8,7 @@ public class SdpTests
     public void Parse_SimpleSdp_ReturnsCorrectMessage()
     {
         // Arrange
-        string sdp = "v=0\r\n" +
+        const string sdp = "v=0\r\n" +
                      "o=- 12345 67890 IN IP4 127.0.0.1\r\n" +
                      "s=TestSession\r\n" +
                      "t=0 0\r\n" +

@@ -33,7 +33,7 @@ public class StunTests
         var message = new StunMessage
         {
             Type = StunMessageType.BindingRequest,
-            TransactionId = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }
+            TransactionId = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
         };
         byte[] buffer = new byte[20];
 
@@ -79,7 +79,7 @@ public class StunTests
         var message = new StunMessage
         {
             Type = StunMessageType.BindingRequest,
-            TransactionId = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 },
+            TransactionId = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
             Attributes =
             {
                 new StunAttribute { Type = StunAttributeType.Username, Value = System.Text.Encoding.UTF8.GetBytes("local:remote") },

@@ -45,7 +45,7 @@ internal class DcepMessage
     {
         if (Type == DcepMessageType.DataChannelAck)
         {
-            return new byte[] { (byte)Type };
+            return [(byte)Type];
         }
 
         byte[] labelBytes = Encoding.UTF8.GetBytes(Label);

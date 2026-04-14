@@ -8,7 +8,7 @@ public class SdpMessageTests
     public void Parse_WithConnectionLine_SetsProperty()
     {
         // Arrange
-        string sdp = "v=0\r\no=- 123 456 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\n";
+        const string sdp = "v=0\r\no=- 123 456 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\n";
 
         // Act
         var message = SdpMessage.Parse(sdp);
@@ -37,7 +37,7 @@ public class SdpMessageTests
     public void Parse_WithMultipleMedia_SetsCorrectMids()
     {
         // Arrange
-        string sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\n" +
+        const string sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\n" +
                      "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n" +
                      "m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:1\r\n";
 
@@ -53,7 +53,7 @@ public class SdpMessageTests
     [Fact]
     public void Parse_WithMediaLevelConnectionLine_PreservesMediaConnection()
     {
-        string sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n" +
+        const string sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n" +
                      "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\n";
 
         var message = SdpMessage.Parse(sdp);

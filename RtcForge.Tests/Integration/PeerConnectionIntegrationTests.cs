@@ -187,7 +187,7 @@ public class PeerConnectionIntegrationTests
         // Let's simulate ICE Connected state
         var handleIceStateChange = typeof(RTCPeerConnection)
             .GetMethod("HandleIceStateChange", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        handleIceStateChange.Invoke(pc, new object[] { iceAgent, IceState.Connected });
+        handleIceStateChange.Invoke(pc, [iceAgent, IceState.Connected]);
 
         // Wait a bit for InitializeDtlsAsync to run (it's FireAndForget)
         await Task.Delay(TimeSpan.FromMilliseconds(100), TimeProvider.System);
@@ -204,7 +204,7 @@ public class PeerConnectionIntegrationTests
             .GetMethod("HandleIncomingRtcpPacket", BindingFlags.Instance | BindingFlags.NonPublic)!;
         
         // This should not throw and should dispatch to sender
-        handleIncomingRtcpPacket.Invoke(pc, new object[] { iceAgent, udpPacket });
+        handleIncomingRtcpPacket.Invoke(pc, [iceAgent, udpPacket]);
 
         // Assert
         // If we reached here without exception, and the transport was set, the logic is covered.

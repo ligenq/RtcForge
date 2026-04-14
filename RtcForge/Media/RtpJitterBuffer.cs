@@ -10,7 +10,7 @@ public class RtpJitterBuffer
     private readonly SortedDictionary<ushort, RtpPacket> _buffer = new();
     private readonly int _maxPackets;
     private ushort? _lastPoppedSeq;
-    private readonly object _lock = new();
+    private readonly Lock _lock = new();
     private DateTimeOffset? _waitingSince;
     private readonly TimeSpan _maxWaitTime;
     private readonly TimeProvider _timeProvider;

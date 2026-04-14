@@ -40,7 +40,7 @@ public class TurnAllocationTests
                 return Task.CompletedTask;
             });
 
-        await allocation.SendToPeerAsync(new byte[] { 1, 2, 3 }, new IPEndPoint(IPAddress.Parse("198.51.100.20"), 51413));
+        await allocation.SendToPeerAsync([1, 2, 3], new IPEndPoint(IPAddress.Parse("198.51.100.20"), 51413));
 
         Assert.Equal(
             new[] { StunMessageType.CreatePermissionRequest, StunMessageType.ChannelBindRequest },
@@ -59,11 +59,11 @@ public class TurnAllocationTests
         var message = new StunMessage
         {
             Type = StunMessageType.DataIndication,
-            TransactionId = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 },
+            TransactionId = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
             Attributes =
             {
-                StunAttribute.CreateXorPeerAddress(peerEndPoint, new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }),
-                new StunAttribute { Type = StunAttributeType.Data, Value = new byte[] { 9, 8, 7 } }
+                StunAttribute.CreateXorPeerAddress(peerEndPoint, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]),
+                new StunAttribute { Type = StunAttributeType.Data, Value = [9, 8, 7] }
             }
         };
         byte[] buffer = new byte[message.GetSerializedLength()];
@@ -100,7 +100,7 @@ public class TurnAllocationTests
             _ => Task.CompletedTask);
 
         var peerEndPoint = new IPEndPoint(IPAddress.Parse("198.51.100.20"), 51413);
-        await allocation.SendToPeerAsync(new byte[] { 1 }, peerEndPoint);
+        await allocation.SendToPeerAsync([1], peerEndPoint);
 
         byte[] channelPacket = new byte[8];
         BinaryPrimitives.WriteUInt16BigEndian(channelPacket.AsSpan(0, 2), 0x4000);

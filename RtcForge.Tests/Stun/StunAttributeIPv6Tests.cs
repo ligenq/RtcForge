@@ -74,7 +74,7 @@ public class StunAttributeIPv6Tests
         var attr = new StunAttribute
         {
             Type = StunAttributeType.XorMappedAddress,
-            Value = new byte[] { 0, 0x03, 0, 0, 0, 0, 0, 0 } // family 0x03 is invalid
+            Value = [0, 0x03, 0, 0, 0, 0, 0, 0] // family 0x03 is invalid
         };
 
         var result = attr.GetXorMappedAddress(new byte[12]);
@@ -88,7 +88,7 @@ public class StunAttributeIPv6Tests
         var attr = new StunAttribute
         {
             Type = StunAttributeType.XorMappedAddress,
-            Value = new byte[] { 0, 0x02, 0, 0, 0, 0, 0, 0, 0, 0 } // IPv6 but only 10 bytes
+            Value = [0, 0x02, 0, 0, 0, 0, 0, 0, 0, 0] // IPv6 but only 10 bytes
         };
 
         var result = attr.GetXorMappedAddress(new byte[12]);

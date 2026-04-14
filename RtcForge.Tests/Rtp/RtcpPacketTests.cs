@@ -48,7 +48,7 @@ public class RtcpPacketTests
         Assert.Equal(0x00, buffer[2]);
         Assert.Equal(0x06, buffer[3]);
         Assert.Equal(0x11, buffer[8]);
-        Assert.Equal(100u, BitConverter.ToUInt32(new byte[] { buffer[23], buffer[22], buffer[21], buffer[20] })); // Big-endian check
+        Assert.Equal(100u, BitConverter.ToUInt32([buffer[23], buffer[22], buffer[21], buffer[20]])); // Big-endian check
     }
 
     [Fact]

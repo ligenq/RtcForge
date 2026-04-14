@@ -95,14 +95,14 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
     private volatile PeerConnectionState _connectionState = PeerConnectionState.New;
     private readonly IceAgent _iceAgent;
     private readonly DtlsCertificate _dtlsCertificate;
-    private readonly object _stateLock = new();
+    private readonly Lock _stateLock = new();
     private SdpMessage? _localDescription;
     private SdpMessage? _remoteDescription;
     private Sctp.SctpAssociation? _sctpAssociation;
     private readonly List<RTCDataChannel> _dataChannels = new();
-    private readonly object _dataChannelLock = new();
+    private readonly Lock _dataChannelLock = new();
     private readonly List<RTCRtpTransceiver> _transceivers = new();
-    private readonly object _transceiverLock = new();
+    private readonly Lock _transceiverLock = new();
     private DtlsTransport? _dtlsTransport;
     private RTCDtlsTransport? _publicDtlsTransport;
     private volatile Srtp.SrtpSession? _srtpSession;

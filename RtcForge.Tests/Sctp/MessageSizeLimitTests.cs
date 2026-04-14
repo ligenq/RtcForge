@@ -95,7 +95,7 @@ public class MessageSizeLimitTests
         var assoc = new SctpAssociation(5000, 5000, _ => Task.CompletedTask);
 
         await Assert.ThrowsAsync<InvalidOperationException>(
-            () => assoc.SendDataAsync(1, 53, new byte[] { 1, 2, 3 }));
+            () => assoc.SendDataAsync(1, 53, [1, 2, 3]));
 
         assoc.Dispose();
     }

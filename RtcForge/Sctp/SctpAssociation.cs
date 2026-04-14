@@ -27,25 +27,25 @@ public partial class SctpAssociation : IDisposable
     private uint _peerInitialTsn;
     private uint _myTsn;
     private uint _cumulativeTsnAckPoint;
-    private readonly object _tsnLock = new();
+    private readonly Lock _tsnLock = new();
 
     private readonly Channel<SctpPacket> _inputChannel = Channel.CreateBounded<SctpPacket>(
         new BoundedChannelOptions(1024) { FullMode = BoundedChannelFullMode.Wait });
     private readonly Func<byte[], Task> _sendFunc;
     private readonly ConcurrentDictionary<ushort, RTCDataChannel> _dataChannels = new();
     private readonly ConcurrentDictionary<ushort, SctpStream> _streams = new();
-    private readonly object _receiveLock = new();
+    private readonly Lock _receiveLock = new();
     private readonly SortedSet<uint> _receivedTsns = new();
     private readonly ConcurrentDictionary<ushort, ushort> _outboundSsns = new();
     private readonly CancellationTokenSource _cts = new();
     private readonly TimeProvider _timeProvider;
 
-    private readonly Microsoft.Extensions.Logging.ILoggerFactory? _loggerFactory;
-    private readonly Microsoft.Extensions.Logging.ILogger<SctpAssociation>? _logger;
+    private readonly ILoggerFactory? _loggerFactory;
+    private readonly ILogger<SctpAssociation>? _logger;
 
     public SctpAssociationState State => _state;
 
-    public SctpAssociation(ushort sourcePort, ushort destinationPort, Func<byte[], Task> sendFunc, Microsoft.Extensions.Logging.ILoggerFactory? loggerFactory = null, TimeProvider? timeProvider = null)
+    public SctpAssociation(ushort sourcePort, ushort destinationPort, Func<byte[], Task> sendFunc, ILoggerFactory? loggerFactory = null, TimeProvider? timeProvider = null)
     {
         _loggerFactory = loggerFactory;
         _logger = loggerFactory?.CreateLogger<SctpAssociation>();
