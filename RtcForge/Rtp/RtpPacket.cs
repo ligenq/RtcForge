@@ -21,7 +21,7 @@ public class RtpPacket
     public uint Ssrc { get; set; }
     public uint[]? Csrc { get; set; }
     public byte[]? ExtensionHeader { get; set; } // Optional: Can be further refined
-    public Memory<byte> Payload { get; set; }
+    public ReadOnlyMemory<byte> Payload { get; set; }
 
     public RtpPacket() { }
 
@@ -126,7 +126,7 @@ public class RtpPacket
             Ssrc = ssrc,
             Csrc = csrc,
             ExtensionHeader = extensionHeader,
-            Payload = buffer.Slice(offset, payloadLength).ToArray().AsMemory() // TODO: Optimize with memory pooling
+            Payload = memory.Slice(offset, payloadLength)
         };
 
         return true;

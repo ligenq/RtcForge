@@ -1,5 +1,6 @@
 <Solution>
   <Project Path="RtcForge/RtcForge.csproj" />
   <Project Path="RtcForge.Tests/RtcForge.Tests.csproj" />
+  <Project Path="RtcForge.CoyoteTests/RtcForge.CoyoteTests.csproj" />
   <Project Path="RtcForge.Demo/RtcForge.Demo.csproj" />
 </Solution>

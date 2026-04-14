@@ -44,17 +44,22 @@ internal class SctpStream
 
         if (hasBegin && hasEnd)
         {
-            var orderedFragments = fragments.OrderBy(f => f.Tsn).ToList();
-            int totalLen = orderedFragments.Sum(f => f.UserData.Length);
-            byte[] messageData = new byte[totalLen];
-            int offset = 0;
-            foreach (var f in orderedFragments)
+            fragments.Sort(static (left, right) => left.Tsn.CompareTo(right.Tsn));
+            int totalLen = 0;
+            foreach (var fragment in fragments)
             {
-                Buffer.BlockCopy(f.UserData, 0, messageData, offset, f.UserData.Length);
-                offset += f.UserData.Length;
+                totalLen += fragment.UserData.Length;
             }
 
-            _onMessage(orderedFragments[0].PayloadProtocolId, messageData);
+            byte[] messageData = new byte[totalLen];
+            int offset = 0;
+            foreach (var fragment in fragments)
+            {
+                Buffer.BlockCopy(fragment.UserData, 0, messageData, offset, fragment.UserData.Length);
+                offset += fragment.UserData.Length;
+            }
+
+            _onMessage(fragments[0].PayloadProtocolId, messageData);
             _reassemblyBuffer.Remove(chunk.StreamSequenceNumber);
         }
     }

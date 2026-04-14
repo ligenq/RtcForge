@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Buffers;
 using System.Security.Cryptography;
 
 namespace RtcForge.Stun;
@@ -7,8 +8,7 @@ public static class StunSecurity
 {
     public static byte[] CalculateMessageIntegrity(ReadOnlySpan<byte> data, ReadOnlySpan<byte> key)
     {
-        using var hmac = new HMACSHA1(key.ToArray());
-        return hmac.ComputeHash(data.ToArray());
+        return HMACSHA1.HashData(key, data);
     }
 
     public static uint CalculateFingerprint(ReadOnlySpan<byte> data)
@@ -24,13 +24,22 @@ public static class StunSecurity
             return false;
         }
 
-        byte[] buffer = data.Slice(0, fingerprintValueOffset).ToArray();
-        BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(2, 2), (ushort)(fingerprintHeaderOffset + 8 - StunMessage.HeaderLength));
+        byte[] rented = ArrayPool<byte>.Shared.Rent(fingerprintValueOffset);
+        try
+        {
+            Span<byte> buffer = rented.AsSpan(0, fingerprintValueOffset);
+            data.Slice(0, fingerprintValueOffset).CopyTo(buffer);
+            BinaryPrimitives.WriteUInt16BigEndian(buffer.Slice(2, 2), (ushort)(fingerprintHeaderOffset + 8 - StunMessage.HeaderLength));
 
-        uint expectedCrc = BinaryPrimitives.ReadUInt32BigEndian(data.Slice(fingerprintValueOffset, 4));
-        uint actualCrc = CalculateFingerprint(buffer);
+            uint expectedCrc = BinaryPrimitives.ReadUInt32BigEndian(data.Slice(fingerprintValueOffset, 4));
+            uint actualCrc = CalculateFingerprint(buffer);
 
-        return expectedCrc == actualCrc;
+            return expectedCrc == actualCrc;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
     }
 
     public static bool ValidateMessageIntegrity(ReadOnlySpan<byte> data, ReadOnlySpan<byte> key)
@@ -40,11 +49,20 @@ public static class StunSecurity
             return false;
         }
 
-        byte[] buffer = data.Slice(0, integrityValueOffset).ToArray();
-        BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(2, 2), (ushort)(integrityHeaderOffset + 24 - StunMessage.HeaderLength));
+        byte[] rented = ArrayPool<byte>.Shared.Rent(integrityValueOffset);
+        try
+        {
+            Span<byte> buffer = rented.AsSpan(0, integrityValueOffset);
+            data.Slice(0, integrityValueOffset).CopyTo(buffer);
+            BinaryPrimitives.WriteUInt16BigEndian(buffer.Slice(2, 2), (ushort)(integrityHeaderOffset + 24 - StunMessage.HeaderLength));
 
-        byte[] actual = CalculateMessageIntegrity(buffer, key);
-        return actual.AsSpan().SequenceEqual(data.Slice(integrityValueOffset, 20));
+            byte[] actual = CalculateMessageIntegrity(buffer, key);
+            return actual.AsSpan().SequenceEqual(data.Slice(integrityValueOffset, 20));
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented, clearArray: true);
+        }
     }
 
     public static byte[] DeriveTurnKey(string username, string realm, string password)

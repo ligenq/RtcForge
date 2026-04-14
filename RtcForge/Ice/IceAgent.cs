@@ -689,6 +689,11 @@ public class IceAgent : IIceAgent
 
     public async Task SendDataAsync(byte[] data)
     {
+        await SendDataAsync(data.AsMemory()).ConfigureAwait(false);
+    }
+
+    internal async Task SendDataAsync(ReadOnlyMemory<byte> data)
+    {
         if (_selectedTransport == null || _selectedRemoteCandidate == null || _selectedLocalCandidate == null)
         {
             return;
@@ -705,7 +710,7 @@ public class IceAgent : IIceAgent
             var allocation = GetTurnAllocation(_selectedLocalCandidate)
                 ?? throw new InvalidOperationException("TURN allocation not found for selected relay candidate.");
 
-            await allocation.SendToPeerAsync(data, remoteEp, _cts.Token).ConfigureAwait(false);
+            await allocation.SendToPeerAsync(data.ToArray(), remoteEp, _cts.Token).ConfigureAwait(false);
             return;
         }
 

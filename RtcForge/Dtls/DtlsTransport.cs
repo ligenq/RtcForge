@@ -28,6 +28,7 @@ public class DtlsTransport : IDtlsTransport
     private BouncyCastleDatagramTransport? _bcTransport;
     private SrtpKeys? _srtpKeys;
     private readonly DtlsCertificate _certificate;
+    private readonly object _sendLock = new();
     private string? _remoteFingerprint;
     private string? _remoteFingerprintAlg;
 
@@ -128,14 +129,19 @@ public class DtlsTransport : IDtlsTransport
         }
     }
 
-    public async Task SendAsync(byte[] data)
+    public Task SendAsync(byte[] data)
     {
         if (State != DtlsState.Connected || _dtlsTransport == null)
         {
             throw new InvalidOperationException("DTLS not connected");
         }
 
-        await Task.Run(() => _dtlsTransport.Send(data, 0, data.Length));
+        lock (_sendLock)
+        {
+            _dtlsTransport.Send(data, 0, data.Length);
+        }
+
+        return Task.CompletedTask;
     }
 
     public SrtpKeys? GetSrtpKeys() => _srtpKeys;

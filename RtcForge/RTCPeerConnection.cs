@@ -9,31 +9,88 @@ using RtcForge.Media;
 
 namespace RtcForge;
 
+/// <summary>
+/// Describes the SDP signaling state of an <see cref="RTCPeerConnection"/>.
+/// </summary>
 public enum SignalingState
 {
+    /// <summary>
+    /// No offer/answer exchange is currently pending.
+    /// </summary>
     Stable,
+
+    /// <summary>
+    /// A local offer has been created and applied.
+    /// </summary>
     HaveLocalOffer,
+
+    /// <summary>
+    /// A remote offer has been applied and an answer has not yet been applied.
+    /// </summary>
     HaveRemoteOffer,
+
+    /// <summary>
+    /// A local provisional answer has been applied.
+    /// </summary>
     HaveLocalPranswer,
+
+    /// <summary>
+    /// A remote provisional answer has been applied.
+    /// </summary>
     HaveRemotePranswer,
+
+    /// <summary>
+    /// The peer connection has been closed.
+    /// </summary>
     Closed
 }
 
+/// <summary>
+/// Describes the transport connectivity state of an <see cref="RTCPeerConnection"/>.
+/// </summary>
 public enum PeerConnectionState
 {
+    /// <summary>
+    /// The connection has not started ICE connectivity checks.
+    /// </summary>
     New,
+
+    /// <summary>
+    /// ICE connectivity checks are in progress.
+    /// </summary>
     Connecting,
+
+    /// <summary>
+    /// ICE connectivity has succeeded.
+    /// </summary>
     Connected,
+
+    /// <summary>
+    /// Connectivity was interrupted.
+    /// </summary>
     Disconnected,
+
+    /// <summary>
+    /// Connectivity failed.
+    /// </summary>
     Failed,
+
+    /// <summary>
+    /// The peer connection has been closed.
+    /// </summary>
     Closed
 }
 
+/// <summary>
+/// Provides low-level WebRTC peer connection functionality for ICE, DTLS, RTP, and SCTP data channels.
+/// </summary>
+/// <remarks>
+/// Application code that only needs data channels should usually prefer <see cref="WebRtcConnection"/>.
+/// </remarks>
 public class RTCPeerConnection : IAsyncDisposable, IDisposable
 {
     private const int DefaultSctpPort = 5000;
     private const int DefaultMaxMessageSize = 262144;
-    private static readonly TimeSpan DefaultConnectionTimeout = TimeSpan.FromSeconds(30);
     private volatile SignalingState _signalingState = SignalingState.Stable;
     private volatile PeerConnectionState _connectionState = PeerConnectionState.New;
     private readonly IceAgent _iceAgent;
@@ -56,26 +113,59 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
     private readonly ILoggerFactory? _loggerFactory;
     private readonly ILogger<RTCPeerConnection>? _logger;
     private readonly TimeProvider _timeProvider;
+    private readonly TimeSpan _connectionTimeout;
     private readonly CancellationTokenSource _cts = new();
     private bool _disposed;
 
+    /// <summary>
+    /// Gets the current SDP signaling state.
+    /// </summary>
     public SignalingState SignalingState => _signalingState;
+
+    /// <summary>
+    /// Gets the current peer connection state.
+    /// </summary>
     public PeerConnectionState ConnectionState => _connectionState;
+
+    /// <summary>
+    /// Gets a snapshot of the RTP transceivers owned by this connection.
+    /// </summary>
+    /// <returns>A snapshot of the current transceivers.</returns>
     public IEnumerable<RTCRtpTransceiver> GetTransceivers()
     {
         lock (_transceiverLock) { return _transceivers.ToList(); }
     }
 
+    /// <summary>
+    /// Occurs when a local ICE candidate has been gathered.
+    /// </summary>
     public event EventHandler<IceCandidate>? OnIceCandidate;
+
+    /// <summary>
+    /// Occurs when the peer connection state changes.
+    /// </summary>
     public event EventHandler<PeerConnectionState>? OnConnectionStateChange;
+
+    /// <summary>
+    /// Occurs when the remote peer opens a data channel.
+    /// </summary>
     public event EventHandler<RTCDataChannel>? OnDataChannel;
+
+    /// <summary>
+    /// Occurs when a remote media track is discovered.
+    /// </summary>
     public event EventHandler<RTCTrackEvent>? OnTrack;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="RTCPeerConnection"/> class.
+    /// </summary>
+    /// <param name="configuration">Optional peer connection configuration.</param>
     public RTCPeerConnection(RTCConfiguration? configuration = null)
     {
         _loggerFactory = configuration?.LoggerFactory;
         _logger = configuration?.LoggerFactory?.CreateLogger<RTCPeerConnection>();
         _timeProvider = configuration?.TimeProvider ?? TimeProvider.System;
+        _connectionTimeout = configuration?.ConnectionTimeout ?? TimeSpan.FromSeconds(30);
         _iceAgent = new IceAgent(configuration?.LoggerFactory, _timeProvider);
         if (configuration?.IceServers != null)
         {
@@ -128,7 +218,7 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
             int length = packet.Serialize(buffer);
             if (length > 0)
             {
-                await _iceAgent.SendDataAsync(buffer.AsSpan(0, length).ToArray());
+                await _iceAgent.SendDataAsync(buffer.AsMemory(0, length)).ConfigureAwait(false);
             }
         }
         finally
@@ -169,7 +259,7 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
             {
                 if (srtp.Protect(packet, buffer, out int length))
                 {
-                    await _iceAgent.SendDataAsync(buffer.AsSpan(0, length).ToArray());
+                    await _iceAgent.SendDataAsync(buffer.AsMemory(0, length)).ConfigureAwait(false);
                 }
             }
             finally
@@ -179,6 +269,11 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
         }
     }
 
+    /// <summary>
+    /// Adds a local media track to the peer connection.
+    /// </summary>
+    /// <param name="track">The media track to send.</param>
+    /// <returns>The RTP sender associated with the track.</returns>
     public RTCRtpSender AddTrack(MediaStreamTrack track)
     {
         lock (_transceiverLock)
@@ -210,6 +305,11 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
         }
     }
 
+    /// <summary>
+    /// Creates a local SCTP data channel.
+    /// </summary>
+    /// <param name="label">The data channel label.</param>
+    /// <returns>The created data channel.</returns>
     public RTCDataChannel CreateDataChannel(string label)
     {
         RTCDataChannel dc;
@@ -332,6 +432,10 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
         await _sctpAssociation.StartAsync(isClient);
     }
 
+    /// <summary>
+    /// Creates an SDP offer for the current connection configuration.
+    /// </summary>
+    /// <returns>The generated SDP offer.</returns>
     public async Task<SdpMessage> CreateOfferAsync()
     {
         await _iceAgent.StartGatheringAsync();
@@ -367,6 +471,10 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
         return offer;
     }
 
+    /// <summary>
+    /// Creates an SDP answer for the current remote offer.
+    /// </summary>
+    /// <returns>The generated SDP answer.</returns>
     public async Task<SdpMessage> CreateAnswerAsync()
     {
         _iceAgent.StartGatheringAsync().FireAndForget();
@@ -406,6 +514,11 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
         return answer;
     }
 
+    /// <summary>
+    /// Sets the local SDP description.
+    /// </summary>
+    /// <param name="description">The local SDP offer or answer.</param>
+    /// <returns>A completed task when the description has been applied.</returns>
     public Task SetLocalDescriptionAsync(SdpMessage description)
     {
         lock (_stateLock)
@@ -426,6 +539,11 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Sets the remote SDP description.
+    /// </summary>
+    /// <param name="description">The remote SDP offer or answer.</param>
+    /// <returns>A completed task when the description has been applied.</returns>
     public Task SetRemoteDescriptionAsync(SdpMessage description)
     {
         lock (_stateLock)
@@ -474,11 +592,31 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Adds a remote ICE candidate.
+    /// </summary>
+    /// <param name="candidate">The remote ICE candidate.</param>
     public void AddIceCandidate(IceCandidate candidate) => _iceAgent.AddRemoteCandidate(candidate);
 
+    /// <summary>
+    /// Starts ICE connectivity checks using the configured default timeout.
+    /// </summary>
+    /// <param name="cancellationToken">A token used to cancel the connection attempt.</param>
+    /// <returns><see langword="true"/> when ICE connects; otherwise, <see langword="false"/> when the attempt times out or fails.</returns>
     public async Task<bool> ConnectAsync(CancellationToken cancellationToken = default)
     {
-        using var timeoutCts = new CancellationTokenSource(DefaultConnectionTimeout, _timeProvider);
+        return await ConnectAsync(_connectionTimeout, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Starts ICE connectivity checks using a per-call timeout.
+    /// </summary>
+    /// <param name="timeout">The maximum time to spend connecting.</param>
+    /// <param name="cancellationToken">A token used to cancel the connection attempt.</param>
+    /// <returns><see langword="true"/> when ICE connects; otherwise, <see langword="false"/> when the attempt times out or fails.</returns>
+    public async Task<bool> ConnectAsync(TimeSpan timeout, CancellationToken cancellationToken = default)
+    {
+        using var timeoutCts = new CancellationTokenSource(timeout, _timeProvider);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token, timeoutCts.Token);
         try
         {
@@ -542,6 +680,9 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
         OnConnectionStateChange?.Invoke(this, PeerConnectionState.Failed);
     }
 
+    /// <summary>
+    /// Releases resources held by the peer connection.
+    /// </summary>
     public void Dispose()
     {
         if (_disposed) return;
@@ -562,6 +703,10 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
         _cts.Dispose();
     }
 
+    /// <summary>
+    /// Asynchronously releases resources held by the peer connection.
+    /// </summary>
+    /// <returns>A value task that completes when shutdown has finished.</returns>
     public async ValueTask DisposeAsync()
     {
         if (_disposed) return;

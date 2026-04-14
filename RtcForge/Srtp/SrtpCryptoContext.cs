@@ -8,6 +8,8 @@ public class SrtpCryptoContext
 {
     private readonly byte[] _masterKey;
     private readonly byte[] _masterSalt;
+    private readonly Aes _aes = Aes.Create();
+    private readonly object _aesLock = new();
     private byte[]? _sessionKey;
     private byte[]? _sessionSalt;
     private byte[]? _sessionAuthKey;
@@ -28,6 +30,9 @@ public class SrtpCryptoContext
         _sessionKey = SrtpKeyDerivation.DeriveKey(_masterKey, _masterSalt, 0x00, 16);
         _sessionAuthKey = SrtpKeyDerivation.DeriveKey(_masterKey, _masterSalt, 0x01, 20);
         _sessionSalt = SrtpKeyDerivation.DeriveKey(_masterKey, _masterSalt, 0x02, 14);
+        _aes.Key = _sessionKey;
+        _aes.Mode = CipherMode.ECB;
+        _aes.Padding = PaddingMode.None;
     }
 
     public bool Protect(RtpPacket packet, Span<byte> output, out int length)
@@ -48,7 +53,7 @@ public class SrtpCryptoContext
         ConstructIv(iv, packet.Ssrc, packet.SequenceNumber, _roc);
 
         Span<byte> payload = output.Slice(headerLen, packet.Payload.Length);
-        SrtpAesCtr.Transform(_sessionKey!, iv.ToArray(), payload); // AesCtr currently takes byte[] for IV
+        SrtpAesCtr.Transform(_aes, _aesLock, iv, payload);
 
         // Authentication Tag (HMAC-SHA1-80)
         Span<byte> rocBytes = stackalloc byte[4];
@@ -112,7 +117,7 @@ public class SrtpCryptoContext
 
         // We must copy the payload to decrypt it as packet.Payload might be read-only or shared
         byte[] decryptedPayload = packet.Payload.ToArray();
-        SrtpAesCtr.Transform(_sessionKey!, iv.ToArray(), decryptedPayload);
+        SrtpAesCtr.Transform(_aes, _aesLock, iv, decryptedPayload);
         packet.Payload = decryptedPayload.AsMemory();
 
         return true;

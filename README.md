@@ -20,7 +20,7 @@ The current implementation has working coverage for:
 - SCTP association setup, retransmission handling, DCEP, and data channel messaging.
 - SRTP key derivation and RTP/RTCP protection/unprotection.
 - RTP/RTCP packet parsing, packetization helpers, NACK, PLI, FIR, and a small jitter buffer.
-- A compact `WebRtcConnection` abstraction for SDP/candidate exchange and data channels.
+- A compact event-free `WebRtcConnection` abstraction for SDP/candidate exchange and data channels.
 - A demo app with loopback, file-signaled interop, and local browser harness modes.
 
 Known limitations:
@@ -48,38 +48,85 @@ For local development, reference the project directly:
 
 ## Quick Start
 
-This example shows the high-level data-channel flow. Signaling is intentionally left to the host application.
+This example shows an in-process high-level data-channel flow. Real applications should send descriptions and ICE candidates through their own signaling channel, such as WebSocket, HTTP, files, or another application protocol.
 
 ```csharp
 using RtcForge;
 
 await using var local = new WebRtcConnection();
 await using var remote = new WebRtcConnection();
+using var sampleCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 
-local.IceCandidateReady += async (_, candidate) =>
-    await remote.AddRemoteIceCandidateAsync(candidate);
-
-remote.IceCandidateReady += async (_, candidate) =>
-    await local.AddRemoteIceCandidateAsync(candidate);
-
-remote.DataChannelOpened += (_, channel) =>
+var localCandidates = Task.Run(async () =>
 {
-    channel.MessageReceived += data =>
-        Console.WriteLine($"received {data.Length} bytes");
-};
+    await foreach (var candidate in local.IceCandidates.WithCancellation(sampleCts.Token))
+    {
+        await remote.AddRemoteIceCandidateAsync(candidate, sampleCts.Token);
+    }
+});
+
+var remoteCandidates = Task.Run(async () =>
+{
+    await foreach (var candidate in remote.IceCandidates.WithCancellation(sampleCts.Token))
+    {
+        await local.AddRemoteIceCandidateAsync(candidate, sampleCts.Token);
+    }
+});
+
+var remoteChannels = Task.Run(async () =>
+{
+    await foreach (var channel in remote.DataChannels.WithCancellation(sampleCts.Token))
+    {
+        await foreach (var message in channel.Messages.WithCancellation(sampleCts.Token))
+        {
+            Console.WriteLine($"received {message.Length} bytes");
+        }
+    }
+});
 
 var channel = local.CreateDataChannel("chat");
 
-var offer = await local.CreateOfferAsync();
-await local.SetLocalDescriptionAsync(offer);
-await remote.SetRemoteDescriptionAsync(offer);
+var offer = await local.CreateOfferAndSetLocalAsync();
+var answer = await remote.AcceptOfferAsync(offer);
+await local.SetAnswerAsync(answer);
 
-var answer = await remote.CreateAnswerAsync();
-await remote.SetLocalDescriptionAsync(answer);
-await local.SetRemoteDescriptionAsync(answer);
+await Task.WhenAll(
+    local.ConnectAsync(TimeSpan.FromSeconds(10)),
+    remote.ConnectAsync(TimeSpan.FromSeconds(10)));
 
-await Task.WhenAll(local.ConnectAsync(), remote.ConnectAsync());
-await channel.SendAsync("hello"u8.ToArray());
+await channel.WaitUntilOpenAsync(sampleCts.Token);
+await channel.SendAsync("hello"u8.ToArray(), sampleCts.Token);
+
+await local.DisposeAsync();
+await remote.DisposeAsync();
+sampleCts.Cancel();
+
+try
+{
+    await Task.WhenAll(localCandidates, remoteCandidates, remoteChannels);
+}
+catch (OperationCanceledException)
+{
+}
+```
+
+Data channels can also be consumed as length-prefixed streams:
+
+```csharp
+await using Stream stream = channel.AsStream();
+await stream.WriteAsync("hello stream"u8.ToArray());
+```
+
+Use either `IWebRtcDataChannel.Messages` or `IWebRtcDataChannel.AsStream()` for a given channel. Reading both from the same channel can split messages between consumers.
+
+Connection options can be supplied through `WebRtcConnectionOptions`:
+
+```csharp
+var connection = WebRtcConnection.Create(new WebRtcConnectionOptions
+{
+    ConnectionTimeout = TimeSpan.FromSeconds(15),
+    TimeProvider = TimeProvider.System
+});
 ```
 
 For lower-level work, the protocol pieces are available under namespaces such as `RtcForge.Ice`, `RtcForge.Stun`, `RtcForge.Dtls`, `RtcForge.Sctp`, `RtcForge.Srtp`, `RtcForge.Rtp`, `RtcForge.Sdp`, and `RtcForge.Media`.
@@ -88,6 +135,7 @@ For lower-level work, the protocol pieces are available under namespaces such as
 
 - `RtcForge/` - library source.
 - `RtcForge.Tests/` - unit and integration tests.
+- `RtcForge.CoyoteTests/` - systematic concurrency tests using Microsoft Coyote.
 - `RtcForge.Demo/` - console demo and browser harness.
 
 ## Build And Test
@@ -95,17 +143,21 @@ For lower-level work, the protocol pieces are available under namespaces such as
 ```powershell
 dotnet build RtcForge\RtcForge.csproj
 dotnet test RtcForge.Tests\RtcForge.Tests.csproj
+dotnet test RtcForge.CoyoteTests\RtcForge.CoyoteTests.csproj
 dotnet pack RtcForge\RtcForge.csproj
 ```
 
 The latest local verification for this README:
 
 ```text
-dotnet build RtcForge\RtcForge.csproj -v minimal -nr:false
+dotnet build RtcForge.slnx -v minimal --no-restore -nr:false -p:UseSharedCompilation=false
 Build succeeded
 
-dotnet test RtcForge.Tests\RtcForge.Tests.csproj -v minimal
-Passed: 188
+dotnet test RtcForge.Tests\RtcForge.Tests.csproj --no-build -v minimal
+Passed: 232
+
+dotnet test RtcForge.CoyoteTests\RtcForge.CoyoteTests.csproj --no-build -v minimal
+Passed: 3
 
 dotnet pack RtcForge\RtcForge.csproj -v minimal
 Created RtcForge.0.1.0-alpha.1.nupkg
@@ -152,7 +204,7 @@ The project currently targets `net8.0` and `net10.0`, and packs as the experimen
 Before publishing a stable package, the main remaining cleanup items are:
 
 - Review public API names and compatibility guarantees.
-- Add XML documentation for the public surface currently covered by the prerelease API.
+- Decide which lower-level protocol-building-block types should remain public in the stable NuGet API.
 - Expand browser and TURN interop testing.
 
 ## License

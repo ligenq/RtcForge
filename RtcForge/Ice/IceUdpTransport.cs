@@ -8,6 +8,9 @@ namespace RtcForge.Ice;
 
 public class IceUdpTransport : IDisposable
 {
+    private const int MaxDatagramSize = 65536;
+    private const int ReceiveQueueCapacity = 1024;
+
     private readonly UdpClient _udpClient;
     private readonly Channel<UdpPacket> _receiveChannel;
     private readonly CancellationTokenSource _cts = new();
@@ -23,7 +26,12 @@ public class IceUdpTransport : IDisposable
     {
         _logger = loggerFactory?.CreateLogger<IceUdpTransport>();
         _udpClient = new UdpClient(localEndPoint);
-        _receiveChannel = Channel.CreateUnbounded<UdpPacket>();
+        _receiveChannel = Channel.CreateBounded<UdpPacket>(new BoundedChannelOptions(ReceiveQueueCapacity)
+        {
+            FullMode = BoundedChannelFullMode.Wait,
+            SingleReader = true,
+            SingleWriter = true
+        });
 
         // Start the receive loop
         Task.Run(ReceiveLoopAsync).FireAndForget();
@@ -38,7 +46,7 @@ public class IceUdpTransport : IDisposable
                 : new IPEndPoint(IPAddress.Any, 0);
             while (!_cts.IsCancellationRequested)
             {
-                byte[] buffer = ArrayPool<byte>.Shared.Rent(65536);
+                byte[] buffer = ArrayPool<byte>.Shared.Rent(MaxDatagramSize);
                 try
                 {
                     var result = await _udpClient.Client.ReceiveFromAsync(buffer, SocketFlags.None, remoteEP, _cts.Token);
@@ -69,7 +77,12 @@ public class IceUdpTransport : IDisposable
 
     public async Task SendAsync(byte[] data, IPEndPoint remoteEndPoint)
     {
-        await _udpClient.SendAsync(data, data.Length, remoteEndPoint);
+        await SendAsync(data.AsMemory(), remoteEndPoint).ConfigureAwait(false);
+    }
+
+    public async Task SendAsync(ReadOnlyMemory<byte> data, IPEndPoint remoteEndPoint)
+    {
+        await _udpClient.Client.SendToAsync(data, SocketFlags.None, remoteEndPoint, _cts.Token).ConfigureAwait(false);
     }
 
     public ChannelReader<UdpPacket> GetReader() => _receiveChannel.Reader;

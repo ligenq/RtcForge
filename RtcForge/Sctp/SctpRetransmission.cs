@@ -31,14 +31,14 @@ public partial class SctpAssociation
         {
             try { await Task.Delay(TimeSpan.FromMilliseconds(100), _timeProvider, _cts.Token); }
             catch (OperationCanceledException) { return; }
-            List<SctpOutboundChunk> toRetransmit = new();
+            List<SctpOutboundChunk> toRetransmit = [];
 
             lock (_outboundLock)
             {
                 var now = _timeProvider.GetUtcNow();
-                foreach (var item in _outboundQueue.Values.Where(v => !v.Acked))
+                foreach (var item in _outboundQueue.Values)
                 {
-                    if ((now - item.SentTime).TotalMilliseconds > _rto)
+                    if (!item.Acked && (now - item.SentTime).TotalMilliseconds > _rto)
                     {
                         toRetransmit.Add(item);
                     }

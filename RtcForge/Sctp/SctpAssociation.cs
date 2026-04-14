@@ -253,7 +253,15 @@ public partial class SctpAssociation : IDisposable
     {
         lock (_outboundLock)
         {
-            var ackedTsns = _outboundQueue.Keys.Where(tsn => tsn <= sack.CumulativeTsnAck).ToList();
+            List<uint> ackedTsns = [];
+            foreach (uint tsn in _outboundQueue.Keys)
+            {
+                if (tsn <= sack.CumulativeTsnAck)
+                {
+                    ackedTsns.Add(tsn);
+                }
+            }
+
             foreach (var tsn in ackedTsns)
             {
                 if (_outboundQueue.TryGetValue(tsn, out var item))

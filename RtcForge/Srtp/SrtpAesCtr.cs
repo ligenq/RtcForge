@@ -11,15 +11,22 @@ public static class SrtpAesCtr
         aes.Key = key;
         aes.Mode = CipherMode.ECB;
         aes.Padding = PaddingMode.None;
+        Transform(aes, aes, iv, data);
+    }
 
-        byte[] counter = new byte[16];
-        byte[] keystream = new byte[16];
-        iv.CopyTo(counter, 0);
+    internal static void Transform(Aes aes, object syncRoot, ReadOnlySpan<byte> iv, Span<byte> data)
+    {
+        Span<byte> counter = stackalloc byte[16];
+        Span<byte> keystream = stackalloc byte[16];
+        iv.CopyTo(counter);
 
         int offset = 0;
         while (offset < data.Length)
         {
-            aes.EncryptEcb(counter, keystream, PaddingMode.None);
+            lock (syncRoot)
+            {
+                aes.EncryptEcb(counter, keystream, PaddingMode.None);
+            }
 
             int bytesToProcess = Math.Min(16, data.Length - offset);
             for (int i = 0; i < bytesToProcess; i++)
@@ -28,8 +35,8 @@ public static class SrtpAesCtr
             }
 
             // Increment counter (last 16 bits)
-            ushort val = BinaryPrimitives.ReadUInt16BigEndian(counter.AsSpan(14, 2));
-            BinaryPrimitives.WriteUInt16BigEndian(counter.AsSpan(14, 2), (ushort)(val + 1));
+            ushort val = BinaryPrimitives.ReadUInt16BigEndian(counter.Slice(14, 2));
+            BinaryPrimitives.WriteUInt16BigEndian(counter.Slice(14, 2), (ushort)(val + 1));
 
             offset += bytesToProcess;
         }
