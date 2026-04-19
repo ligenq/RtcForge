@@ -27,6 +27,7 @@ public partial class SctpAssociation : IDisposable
     private uint _peerInitialTsn;
     private uint _myTsn;
     private uint _cumulativeTsnAckPoint;
+    private byte[]? _stateCookie;
     private readonly Lock _tsnLock = new();
 
     private readonly Channel<SctpPacket> _inputChannel = Channel.CreateBounded<SctpPacket>(
@@ -62,16 +63,37 @@ public partial class SctpAssociation : IDisposable
 
     internal void RegisterDataChannel(RTCDataChannel channel)
     {
+        _logger?.LogDebug("SCTP registering data channel label={Label} id={Id}", channel.Label, channel.Id);
         _dataChannels.AddOrUpdate(channel.Id, channel, (_, _) => channel);
-        _streams.AddOrUpdate(channel.Id, new SctpStream(channel.Id, channel.HandleIncomingData), (_, _) => new SctpStream(channel.Id, channel.HandleIncomingData));
+        var stream = new SctpStream(channel.Id, (ppid, msg) => DispatchStreamMessage(channel.Id, ppid, msg), _loggerFactory?.CreateLogger("RtcForge.Sctp.SctpStream"));
+        _streams.AddOrUpdate(channel.Id, stream, (_, _) => stream);
+    }
+
+    private void DispatchStreamMessage(ushort streamId, uint ppid, byte[] msg)
+    {
+        _logger?.LogDebug("SCTP stream reassembled streamId={Stream} ppid={Ppid} bytes={Bytes}", streamId, ppid, msg.Length);
+        if (ppid == 50)
+        {
+            HandleDcepMessage(streamId, msg);
+        }
+        else if (_dataChannels.TryGetValue(streamId, out var channel))
+        {
+            channel.HandleIncomingData(ppid, msg);
+        }
+        else
+        {
+            _logger?.LogDebug("SCTP dropping message — no channel registered for streamId={Stream} ppid={Ppid}", streamId, ppid);
+        }
     }
 
     public async Task StartAsync(bool isClient)
     {
+        _logger?.LogInformation("SCTP start role={Role}", isClient ? "client" : "server");
         if (isClient)
         {
             await SendInitAsync();
             _state = SctpAssociationState.CookieWait;
+            _logger?.LogDebug("SCTP state={State}", _state);
         }
 
         Task.Run(() => ProcessPacketsAsync(), _cts.Token).FireAndForget();
@@ -147,7 +169,16 @@ public partial class SctpAssociation : IDisposable
     {
         if (SctpPacket.TryParse(data, out var packet))
         {
+            if (_logger != null && _logger.IsEnabled(LogLevel.Debug))
+            {
+                var types = string.Join(",", packet.Chunks.Select(c => c.Type.ToString()));
+                _logger.LogDebug("SCTP packet rx bytes={Bytes} chunks=[{Types}]", data.Length, types);
+            }
             await _inputChannel.Writer.WriteAsync(packet);
+        }
+        else
+        {
+            _logger?.LogDebug("SCTP packet parse failed bytes={Bytes}", data.Length);
         }
     }
 
@@ -172,6 +203,12 @@ public partial class SctpAssociation : IDisposable
 
     private async Task HandleIncomingPacketInternal(SctpPacket packet)
     {
+        if (!IsVerificationTagValid(packet))
+        {
+            _logger?.LogDebug("SCTP dropping packet with invalid verification tag tag={Tag}", packet.VerificationTag);
+            return;
+        }
+
         foreach (var chunk in packet.Chunks)
         {
             switch (chunk.Type)
@@ -181,6 +218,7 @@ public partial class SctpAssociation : IDisposable
                 case SctpChunkType.CookieEcho: await HandleCookieEcho(packet, chunk); break;
                 case SctpChunkType.CookieAck:
                     _state = SctpAssociationState.Established;
+                    _logger?.LogInformation("SCTP state={State} after CookieAck", _state);
                     OnEstablished?.Invoke(this, EventArgs.Empty);
                     break;
                 case SctpChunkType.Data: await HandleDataChunk((SctpDataChunk)chunk); break;
@@ -208,19 +246,12 @@ public partial class SctpAssociation : IDisposable
             }
         }
 
+        _logger?.LogDebug("SCTP DATA chunk tsn={Tsn} streamId={Stream} ppid={Ppid} payloadBytes={Bytes} isNew={New}",
+            data.Tsn, data.StreamId, data.PayloadProtocolId, data.UserData?.Length ?? 0, isNew);
+
         if (isNew)
         {
-            var stream = _streams.GetOrAdd(data.StreamId, id => new SctpStream(id, (ppid, msg) =>
-            {
-                if (_dataChannels.TryGetValue(id, out var channel))
-                {
-                    channel.HandleIncomingData(ppid, msg);
-                }
-                else if (ppid == 50)
-                {
-                    HandleDcepMessage(id, msg);
-                }
-            }));
+            var stream = _streams.GetOrAdd(data.StreamId, id => new SctpStream(id, (ppid, msg) => DispatchStreamMessage(id, ppid, msg), _loggerFactory?.CreateLogger("RtcForge.Sctp.SctpStream")));
             stream.HandleChunk(data);
         }
         await SendSackAsync();
@@ -231,6 +262,7 @@ public partial class SctpAssociation : IDisposable
     private void HandleDcepMessage(ushort streamId, byte[] msg)
     {
         var dcep = DcepMessage.Parse(msg);
+        _logger?.LogDebug("DCEP message type={Type} streamId={StreamId}", dcep.Type, streamId);
         if (dcep.Type == DcepMessageType.DataChannelOpen)
         {
             var channel = new RTCDataChannel(dcep.Label, streamId, this);
@@ -243,6 +275,7 @@ public partial class SctpAssociation : IDisposable
         {
             if (_dataChannels.TryGetValue(streamId, out var channel))
             {
+                _logger?.LogInformation("DCEP ack received for data channel label={Label} id={Id}", channel.Label, channel.Id);
                 channel.SetOpen();
             }
         }
@@ -305,6 +338,7 @@ public partial class SctpAssociation : IDisposable
 
     private async Task SendInitAsync()
     {
+        _logger?.LogDebug("SCTP sending Init");
         var init = new SctpInitChunk(SctpChunkType.Init) { InitiateTag = _myVerificationTag, AdvertisedReceiverWindowCredit = 1024 * 1024, NumberOfInboundStreams = 2048, NumberOfOutboundStreams = 2048, InitialTsn = _myInitialTsn };
         var packet = new SctpPacket { SourcePort = _sourcePort, DestinationPort = _destinationPort, VerificationTag = 0 };
         packet.Chunks.Add(init);
@@ -315,29 +349,79 @@ public partial class SctpAssociation : IDisposable
 
     private async Task HandleInit(SctpPacket _, SctpInitChunk init)
     {
+        _logger?.LogDebug("SCTP received Init");
         _peerVerificationTag = init.InitiateTag;
         _peerInitialTsn = init.InitialTsn;
         _cumulativeTsnAckPoint = _peerInitialTsn - 1;
-        var response = new SctpInitChunk(SctpChunkType.InitAck) { InitiateTag = _myVerificationTag, AdvertisedReceiverWindowCredit = 1024 * 1024, NumberOfInboundStreams = 2048, NumberOfOutboundStreams = 2048, InitialTsn = _myInitialTsn };
+        _stateCookie ??= CreateStateCookie(init);
+        var response = new SctpInitChunk(SctpChunkType.InitAck)
+        {
+            InitiateTag = _myVerificationTag,
+            AdvertisedReceiverWindowCredit = 1024 * 1024,
+            NumberOfInboundStreams = 2048,
+            NumberOfOutboundStreams = 2048,
+            InitialTsn = _myInitialTsn,
+            StateCookie = _stateCookie
+        };
         await SendChunkInternalAsync(response);
+    }
+
+    private bool IsVerificationTagValid(SctpPacket packet)
+    {
+        if (packet.Chunks.Any(c => c.Type == SctpChunkType.Init))
+        {
+            return packet.VerificationTag == 0;
+        }
+
+        return packet.VerificationTag == _myVerificationTag;
     }
 
     private async Task HandleInitAck(SctpPacket _, SctpInitChunk initAck)
     {
+        _logger?.LogDebug("SCTP received InitAck");
         _peerVerificationTag = initAck.InitiateTag;
         _peerInitialTsn = initAck.InitialTsn;
         _cumulativeTsnAckPoint = _peerInitialTsn - 1;
-        await SendChunkInternalAsync(new SctpSimpleChunk { Type = SctpChunkType.CookieEcho, Length = 4 });
+        if (initAck.StateCookie is not { Length: > 0 })
+        {
+            _logger?.LogDebug("SCTP InitAck missing State Cookie");
+            return;
+        }
+
+        await SendChunkInternalAsync(new SctpCookieEchoChunk { Cookie = initAck.StateCookie });
         _state = SctpAssociationState.CookieEchoed;
+        _logger?.LogDebug("SCTP state={State}", _state);
     }
 
     public event EventHandler? OnEstablished;
 
-    private async Task HandleCookieEcho(SctpPacket _, SctpChunk _1)
+    private async Task HandleCookieEcho(SctpPacket _, SctpChunk chunk)
     {
+        _logger?.LogDebug("SCTP received CookieEcho");
+        if (chunk is not SctpCookieEchoChunk cookieEcho
+            || cookieEcho.Cookie.Length == 0
+            || _stateCookie == null
+            || !cookieEcho.Cookie.AsSpan().SequenceEqual(_stateCookie))
+        {
+            _logger?.LogDebug("SCTP dropping CookieEcho with invalid state cookie");
+            return;
+        }
+
         await SendChunkInternalAsync(new SctpSimpleChunk { Type = SctpChunkType.CookieAck, Length = 4 });
         _state = SctpAssociationState.Established;
+        _logger?.LogInformation("SCTP state={State} after CookieEcho", _state);
         OnEstablished?.Invoke(this, EventArgs.Empty);
+    }
+
+    private byte[] CreateStateCookie(SctpInitChunk init)
+    {
+        byte[] cookie = new byte[32];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(cookie.AsSpan(0, 4), init.InitiateTag);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(cookie.AsSpan(4, 4), init.InitialTsn);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(cookie.AsSpan(8, 4), _myVerificationTag);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(cookie.AsSpan(12, 4), _myInitialTsn);
+        System.Security.Cryptography.RandomNumberGenerator.Fill(cookie.AsSpan(16));
+        return cookie;
     }
 
     public void Dispose()

@@ -76,13 +76,13 @@ public partial class SctpAssociation
         _rto = Math.Clamp(_rto, 1000, 60000); // RTO.Min = 1s, RTO.Max = 60s
     }
 
-    private async Task SendChunkInternalAsync(SctpChunk chunk)
+    private async Task SendChunkInternalAsync(SctpChunk chunk, uint? verificationTag = null)
     {
         var packet = new SctpPacket
         {
             SourcePort = _sourcePort,
             DestinationPort = _destinationPort,
-            VerificationTag = _peerVerificationTag
+            VerificationTag = verificationTag ?? _peerVerificationTag
         };
         packet.Chunks.Add(chunk);
 

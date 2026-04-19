@@ -14,10 +14,10 @@ public class IceAgent : IIceAgent
 {
     private static readonly TimeSpan ConsentInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan ConsentTimeout = TimeSpan.FromSeconds(30);
-    private static readonly bool TraceEnabled = string.Equals(
-        Environment.GetEnvironmentVariable("RTCFORGE_TRACE_ICE"),
-        "1",
-        StringComparison.Ordinal);
+    // ICE pair-check tracing is emitted at Debug level via the supplied logger. It used to
+    // be gated behind the RTCFORGE_TRACE_ICE=1 environment variable; that made connectivity
+    // problems effectively invisible when debugging. Callers that don't want the spam can
+    // simply raise the minimum log level for IceAgent's category.
     private IceState _state = IceState.New;
     private readonly Lock _candidateLock = new();
     private readonly List<IceCandidate> _localCandidates = [];
@@ -31,12 +31,14 @@ public class IceAgent : IIceAgent
     private readonly ulong _tieBreaker;
     private readonly List<RTCIceServer> _iceServers = [];
     private readonly Dictionary<string, TurnAllocation> _turnAllocations = [];
+    private readonly ConcurrentDictionary<string, Task<IPAddress?>> _hostnameResolutionCache = new(StringComparer.OrdinalIgnoreCase);
     private IceUdpTransport? _selectedTransport;
     private IceCandidate? _selectedLocalCandidate;
     private IceCandidate? _selectedRemoteCandidate;
     private RTCIceTransportPolicy _transportPolicy = RTCIceTransportPolicy.All;
     private bool _gatheringStarted;
     private readonly SemaphoreSlim _connectGate = new(1, 1);
+    private int _connectKickPending;
     private CancellationTokenSource? _consentCts;
     private readonly TimeProvider _timeProvider;
     private int _disposed;
@@ -119,7 +121,7 @@ public class IceAgent : IIceAgent
                     {
                         var bindAddress = ip.Address.AddressFamily == AddressFamily.InterNetworkV6
                             ? IPAddress.IPv6Any : IPAddress.Any;
-                        var transport = new IceUdpTransport(new IPEndPoint(bindAddress, 0));
+                        var transport = new IceUdpTransport(new IPEndPoint(bindAddress, 0), _loggerFactory);
                         _transports.Add(transport);
                         ProcessTransportAsync(transport).FireAndForget();
 
@@ -155,54 +157,119 @@ public class IceAgent : IIceAgent
         State = IceState.Complete;
     }
 
+    private static readonly TimeSpan SrflxGatherTimeout = TimeSpan.FromSeconds(3);
+
     private async Task GatherSrflxCandidatesAsync(IceUdpTransport transport, IceCandidate hostCandidate)
     {
+        // Query every configured STUN server in parallel so a single slow or dead server
+        // cannot hold up gathering for the whole transport. Each request is capped with
+        // a per-request timeout so we never burn the full RFC retransmission budget.
+        var perServerTasks = new List<Task>();
         foreach (var server in _iceServers)
         {
             foreach (var url in server.Urls)
             {
                 if (url.StartsWith("stun:"))
                 {
-                    try
-                    {
-                        var uri = new Uri(url.Replace("stun:", "stun://"));
-                        var stunEp = new IPEndPoint(Dns.GetHostAddresses(uri.Host)[0], uri.Port > 0 ? uri.Port : 3478);
-
-                        var response = await SendStunBindingRequestAsync(transport, stunEp);
-                        if (response != null)
-                        {
-                            var addrAttr = response.Attributes.Find(a => a.Type == StunAttributeType.XorMappedAddress);
-                            var srflxAddr = addrAttr?.GetXorMappedAddress(response.TransactionId);
-
-                            if (srflxAddr != null)
-                            {
-                                var srflxCandidate = new IceCandidate
-                                {
-                                    Foundation = "2",
-                                    Component = 1,
-                                    Protocol = "udp",
-                                    Priority = CalculateSrflxPriority(),
-                                    Address = srflxAddr.Address.ToString(),
-                                    Port = srflxAddr.Port,
-                                    Type = IceCandidateType.Srflx,
-                                    RelatedAddress = hostCandidate.Address,
-                                    RelatedPort = hostCandidate.Port
-                                };
-                                if (_transportPolicy != RTCIceTransportPolicy.Relay)
-                                {
-                                    lock (_candidateLock) { _localCandidates.Add(srflxCandidate); }
-                                    OnLocalCandidate?.Invoke(this, srflxCandidate);
-                                    Trace($"local candidate {srflxCandidate}");
-                                }
-                            }
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Trace($"srflx gathering failed for {url}: {ex.Message}");
-                    }
+                    perServerTasks.Add(GatherSrflxFromSingleServerAsync(transport, hostCandidate, url));
                 }
             }
+        }
+
+        if (perServerTasks.Count > 0)
+        {
+            await Task.WhenAll(perServerTasks).ConfigureAwait(false);
+        }
+    }
+
+    private async Task GatherSrflxFromSingleServerAsync(IceUdpTransport transport, IceCandidate hostCandidate, string url)
+    {
+        try
+        {
+            var uri = new Uri(url.Replace("stun:", "stun://"));
+            // Pick a DNS result that matches the transport's address family. Otherwise,
+            // sending to (e.g.) an IPv6 STUN server from an IPv4-bound socket fails on
+            // Windows with WSAEFAULT ("invalid pointer"), which is how that mismatch
+            // surfaces via Winsock.
+            var transportFamily = transport.LocalEndPoint.AddressFamily;
+            var candidates = await Dns.GetHostAddressesAsync(uri.Host).ConfigureAwait(false);
+            var matching = Array.Find(candidates, a => a.AddressFamily == transportFamily);
+            if (matching == null)
+            {
+                Trace($"srflx gathering skipped for {url}: no DNS result matching address family {transportFamily}");
+                return;
+            }
+            var stunEp = new IPEndPoint(matching, uri.Port > 0 ? uri.Port : 3478);
+
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+            timeoutCts.CancelAfter(SrflxGatherTimeout);
+
+            StunMessage? response;
+            try
+            {
+                response = await SendPlainStunBindingRequestAsync(transport, stunEp, timeoutCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !_cts.IsCancellationRequested)
+            {
+                Trace($"srflx gathering timed out for {url}");
+                return;
+            }
+
+            if (response == null)
+            {
+                return;
+            }
+
+            var addrAttr = response.Attributes.Find(a => a.Type == StunAttributeType.XorMappedAddress);
+            var srflxAddr = addrAttr?.GetXorMappedAddress(response.TransactionId);
+            if (srflxAddr == null)
+            {
+                return;
+            }
+
+            if (_transportPolicy == RTCIceTransportPolicy.Relay)
+            {
+                return;
+            }
+
+            var srflxCandidate = new IceCandidate
+            {
+                Foundation = "2",
+                Component = 1,
+                Protocol = "udp",
+                Priority = CalculateSrflxPriority(),
+                Address = srflxAddr.Address.ToString(),
+                Port = srflxAddr.Port,
+                Type = IceCandidateType.Srflx,
+                RelatedAddress = hostCandidate.Address,
+                RelatedPort = hostCandidate.Port
+            };
+
+            lock (_candidateLock)
+            {
+                // Dedupe srflx candidates that multiple STUN servers report with the
+                // same public ip:port for the same host candidate.
+                foreach (var existing in _localCandidates)
+                {
+                    if (existing.Type == IceCandidateType.Srflx
+                        && existing.Address == srflxCandidate.Address
+                        && existing.Port == srflxCandidate.Port
+                        && existing.RelatedAddress == srflxCandidate.RelatedAddress
+                        && existing.RelatedPort == srflxCandidate.RelatedPort)
+                    {
+                        return;
+                    }
+                }
+
+                _localCandidates.Add(srflxCandidate);
+            }
+
+            OnLocalCandidate?.Invoke(this, srflxCandidate);
+            Trace($"local candidate {srflxCandidate}");
+        }
+        catch (Exception ex)
+        {
+            Trace($"srflx gathering failed for {url}: {ex.Message}");
         }
     }
 
@@ -346,19 +413,23 @@ public class IceAgent : IIceAgent
             for (int attempt = 0; attempt <= maxRetransmissions; attempt++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                Trace($"stun tx {request.Type} id={tid} attempt={attempt + 1} local={transport.LocalEndPoint} remote={remoteEp} bytes={buffer.Length}");
                 await transport.SendAsync(buffer, remoteEp);
 
                 var delayTask = Task.Delay(TimeSpan.FromMilliseconds(rtoMs), _timeProvider, cancellationToken);
                 var resultTask = await Task.WhenAny(tcs.Task, delayTask);
                 if (resultTask == tcs.Task)
                 {
-                    return await tcs.Task;
+                    var response = await tcs.Task;
+                    Trace($"stun rx matched {response.Type} id={tid} remote={remoteEp}");
+                    return response;
                 }
                 cancellationToken.ThrowIfCancellationRequested();
 
                 rtoMs = Math.Min(rtoMs * 2, 8000);
             }
 
+            Trace($"stun tx timeout {request.Type} id={tid} remote={remoteEp}");
             return null;
         }
         finally
@@ -424,9 +495,17 @@ public class IceAgent : IIceAgent
             {
                 HandleStunMessage(transport, packet.RemoteEndPoint, stun);
             }
+            else
+            {
+                Trace($"ignored stun-like packet from {packet.RemoteEndPoint}: parse failed bytes={packet.Length}");
+            }
         }
         else if (firstByte >= 20 && firstByte <= 63)
         {
+            _logger?.LogDebug(
+                "IceAgent DTLS-classified rx bytes={Bytes} from={Remote} local={Local} first=0x{First:X2} subscribers={Subs}",
+                packet.Length, packet.RemoteEndPoint, transport.LocalEndPoint, firstByte,
+                OnDtlsPacket?.GetInvocationList().Length ?? 0);
             OnDtlsPacket?.Invoke(this, packet);
         }
         else if (firstByte >= 128 && firstByte <= 191)
@@ -444,12 +523,17 @@ public class IceAgent : IIceAgent
                 }
             }
         }
+        else
+        {
+            Trace($"unclassified packet from {packet.RemoteEndPoint} bytes={packet.Length} first=0x{firstByte:X2}");
+        }
     }
 
     private void HandleStunMessage(IceUdpTransport transport, IPEndPoint remoteEndPoint, StunMessage stun)
     {
-        if (!ValidateStunMessage(stun))
+        if (!ValidateStunMessage(stun, out string validationFailure))
         {
+            Trace($"ignored stun message from {remoteEndPoint}: {validationFailure} type={stun.Type} id={BitConverter.ToString(stun.TransactionId)} attrs={FormatStunAttributes(stun)}");
             return;
         }
 
@@ -470,26 +554,44 @@ public class IceAgent : IIceAgent
             {
                 tcs.TrySetResult(stun);
             }
+            else
+            {
+                Trace($"ignored stun response from {remoteEndPoint}: no matching transaction type={stun.Type} id={transactionId}");
+            }
         }
         else if (stun.Type == StunMessageType.BindingRequest)
         {
+            Trace($"received binding request from {remoteEndPoint} id={transactionId}");
             HandleBindingRequestAsync(transport, remoteEndPoint, stun).FireAndForget();
         }
     }
 
     private async Task HandleBindingRequestAsync(IceUdpTransport transport, IPEndPoint remoteEndPoint, StunMessage request)
     {
-        if (request.RawBytes == null
-            || !StunSecurity.ValidateFingerprint(request.RawBytes)
-            || string.IsNullOrEmpty(LocalPassword)
+        if (request.RawBytes == null)
+        {
+            Trace($"ignored binding request from {remoteEndPoint}: missing raw bytes");
+            return;
+        }
+
+        if (request.Attributes.Any(a => a.Type == StunAttributeType.Fingerprint)
+            && !StunSecurity.ValidateFingerprint(request.RawBytes))
+        {
+            Trace($"ignored binding request from {remoteEndPoint}: invalid fingerprint");
+            return;
+        }
+
+        if (string.IsNullOrEmpty(LocalPassword)
             || !StunSecurity.ValidateMessageIntegrity(request.RawBytes, System.Text.Encoding.UTF8.GetBytes(LocalPassword)))
         {
+            Trace($"ignored binding request from {remoteEndPoint}: invalid message integrity");
             return;
         }
 
         var userAttr = request.Attributes.FirstOrDefault(a => a.Type == StunAttributeType.Username);
         if (userAttr == null || System.Text.Encoding.UTF8.GetString(userAttr.Value) != $"{LocalUfrag}:{_remoteUfrag}")
         {
+            Trace($"ignored binding request from {remoteEndPoint}: username mismatch");
             return;
         }
 
@@ -532,8 +634,16 @@ public class IceAgent : IIceAgent
         await transport.SendAsync(buffer, remoteEndPoint);
     }
 
-    public void AddRemoteCandidate(IceCandidate candidate)
+    public void AddRemoteCandidate(IceCandidate candidate) => AddRemoteCandidate(candidate, kickConnect: true);
+
+    internal void AddRemoteCandidate(IceCandidate candidate, bool kickConnect)
     {
+        if (!candidate.Protocol.Equals("udp", StringComparison.OrdinalIgnoreCase))
+        {
+            Trace($"ignored unsupported remote candidate protocol={candidate.Protocol} candidate={candidate}");
+            return;
+        }
+
         lock (_candidateLock)
         {
             if (_remoteCandidates.Any(existing => AreSameCandidate(existing, candidate)))
@@ -544,15 +654,57 @@ public class IceAgent : IIceAgent
             _remoteCandidates.Add(candidate);
         }
         Trace($"remote candidate {candidate}");
+        if (kickConnect)
+        {
+            KickConnectIfReady();
+        }
+    }
+
+    internal void KickConnectIfReady()
+    {
         if (!string.IsNullOrEmpty(_remoteUfrag)
             && !string.IsNullOrEmpty(_remotePassword)
+            && HasCandidatePair()
             && (State == IceState.New
                 || State == IceState.Complete
                 || State == IceState.Checking
                 || State == IceState.Connected
                 || State == IceState.Failed))
         {
-            ConnectAsync().FireAndForget();
+            // Coalesce burst candidate additions (e.g. SDP parsing adds several
+            // a=candidate lines back-to-back) into a single ConnectAsync run.
+            // Without this, each call serializes on _connectGate and each one
+            // burns its own STUN retransmission budget, so lower-priority srflx
+            // pairs never get checked before the outer connect timeout fires.
+            if (Interlocked.CompareExchange(ref _connectKickPending, 1, 0) == 0)
+            {
+                RunConnectKickAsync().FireAndForget();
+            }
+        }
+    }
+
+    private async Task RunConnectKickAsync()
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(10), _timeProvider, _cts.Token).ConfigureAwait(false);
+            if (Volatile.Read(ref _connectKickPending) == 0)
+            {
+                return;
+            }
+
+            await ConnectAsync(_cts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private bool HasCandidatePair()
+    {
+        lock (_candidateLock)
+        {
+            return _localCandidates.Count > 0 && _remoteCandidates.Count > 0;
         }
     }
 
@@ -580,6 +732,8 @@ public class IceAgent : IIceAgent
             throw new InvalidOperationException("Remote credentials not set");
         }
 
+        _logger?.LogInformation("IceAgent.ConnectAsync entered (IsControlling={IsControlling})", IsControlling);
+
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
         var connectToken = linkedCts.Token;
 
@@ -587,6 +741,11 @@ public class IceAgent : IIceAgent
         try
         {
             connectToken.ThrowIfCancellationRequested();
+            // Clear the coalescing flag now that we hold the gate and are about
+            // to snapshot candidates. Any AddRemoteCandidate that wins the CAS
+            // after this point will schedule a follow-up ConnectAsync which will
+            // run as soon as we release the gate.
+            Interlocked.Exchange(ref _connectKickPending, 0);
             State = IceState.Checking;
             _checklist.Clear();
             List<IceCandidate> localSnapshot, remoteSnapshot;
@@ -595,6 +754,7 @@ public class IceAgent : IIceAgent
                 localSnapshot = [.. _localCandidates];
                 remoteSnapshot = [.. _remoteCandidates];
             }
+            _logger?.LogInformation("IceAgent pair-check starting: {LocalCount} local x {RemoteCount} remote candidates", localSnapshot.Count, remoteSnapshot.Count);
             foreach (var local in localSnapshot)
             {
                 foreach (var remote in remoteSnapshot)
@@ -611,64 +771,107 @@ public class IceAgent : IIceAgent
 
             _checklist.Sort((a, b) => b.Priority.CompareTo(a.Priority));
 
-            foreach (var pair in _checklist)
+            // Dispatch all pair checks concurrently. Sequential checks burn the full
+            // STUN retransmission budget (~15s) on each unreachable pair, so unreachable
+            // high-priority host-host pairs would prevent lower-priority srflx-srflx pairs
+            // from ever being tried inside a realistic connect timeout.
+            using var pairCts = CancellationTokenSource.CreateLinkedTokenSource(connectToken);
+            var pending = _checklist
+                .Where(p => p.State != IceState.Connected)
+                .Select(p => TryPairCheckAsync(p, pairCts.Token))
+                .ToList();
+
+            (IceUdpTransport Transport, IceCandidatePair Pair, IPEndPoint RemoteEp)? winner = null;
+            var successful = new List<(IceUdpTransport Transport, IceCandidatePair Pair, IPEndPoint RemoteEp)>();
+            DateTimeOffset? firstSuccessAt = null;
+            var nominationGrace = TimeSpan.FromMilliseconds(200);
+            while (pending.Count > 0)
             {
-                if (pair.State == IceState.Connected)
+                Task<(IceUdpTransport Transport, IceCandidatePair Pair, IPEndPoint RemoteEp)?> completed;
+                if (successful.Count > 0)
                 {
-                    continue;
-                }
+                    var best = successful.MaxBy(s => s.Pair.Priority);
+                    bool higherPriorityStillPending = pending.Any(t =>
+                        !t.IsCompleted
+                        && _checklist.Any(pair =>
+                            pair.State == IceState.Checking
+                            && pair.Priority > best.Pair.Priority));
+                    TimeSpan elapsedSinceFirstSuccess = firstSuccessAt.HasValue
+                        ? _timeProvider.GetUtcNow() - firstSuccessAt.Value
+                        : TimeSpan.Zero;
 
-                pair.State = IceState.Checking;
-                var transport = GetTransportForLocalCandidate(pair.Local);
-                if (transport == null)
-                {
-                    continue;
-                }
-
-                var remoteEp = await ResolveRemoteEndPointAsync(pair.Remote, connectToken).ConfigureAwait(false);
-                if (remoteEp == null)
-                {
-                    Trace($"pair unresolved local={pair.Local} remote={pair.Remote}");
-                    pair.State = IceState.Failed;
-                    continue;
-                }
-
-                Trace($"checking pair local={pair.Local.Address}:{pair.Local.Port} remote={remoteEp}");
-                var response = await SendStunBindingRequestAsync(transport, remoteEp, cancellationToken: connectToken).ConfigureAwait(false);
-                if (IsRoleConflictResponse(response))
-                {
-                    pair.State = IceState.New;
-                    response = await SendStunBindingRequestAsync(transport, remoteEp, cancellationToken: connectToken).ConfigureAwait(false);
-                }
-
-                if (response?.Type == StunMessageType.BindingSuccessResponse)
-                {
-                    if (IsControlling)
+                    if (!higherPriorityStillPending || elapsedSinceFirstSuccess >= nominationGrace)
                     {
-                        var nomination = await SendStunBindingRequestAsync(transport, remoteEp, useCandidate: true, cancellationToken: connectToken).ConfigureAwait(false);
-                        if (IsRoleConflictResponse(nomination))
-                        {
-                            pair.State = IceState.New;
-                            continue;
-                        }
-
-                        if (nomination?.Type == StunMessageType.BindingSuccessResponse)
-                        {
-                            pair.State = IceState.Connected;
-                            SelectPair(transport, pair.Local, pair.Remote, nominated: true);
-                            return true;
-                        }
+                        winner = best;
+                        break;
                     }
-                    else
+
+                    var pendingCompletion = Task.WhenAny(pending);
+                    var graceDelay = Task.Delay(nominationGrace - elapsedSinceFirstSuccess, _timeProvider);
+                    var next = await Task.WhenAny(pendingCompletion, graceDelay).ConfigureAwait(false);
+                    if (next == graceDelay)
+                    {
+                        winner = best;
+                        break;
+                    }
+
+                    completed = await pendingCompletion.ConfigureAwait(false);
+                }
+                else
+                {
+                    completed = await Task.WhenAny(pending).ConfigureAwait(false);
+                }
+
+                pending.Remove(completed);
+                try
+                {
+                    var result = await completed.ConfigureAwait(false);
+                    if (result.HasValue)
+                    {
+                        successful.Add(result.Value);
+                        firstSuccessAt ??= _timeProvider.GetUtcNow();
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            }
+
+            if (!winner.HasValue && successful.Count > 0)
+            {
+                winner = successful.MaxBy(s => s.Pair.Priority);
+            }
+
+            pairCts.Cancel();
+            foreach (var t in pending)
+            {
+                _ = t.ContinueWith(
+                    static completed => _ = completed.Exception,
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+            }
+
+            if (winner.HasValue)
+            {
+                var (transport, pair, remoteEp) = winner.Value;
+                if (IsControlling)
+                {
+                    var nomination = await SendStunBindingRequestAsync(transport, remoteEp, useCandidate: true, cancellationToken: connectToken).ConfigureAwait(false);
+                    if (nomination?.Type == StunMessageType.BindingSuccessResponse)
                     {
                         pair.State = IceState.Connected;
-                        SelectPair(transport, pair.Local, pair.Remote, nominated: false);
+                        SelectPair(transport, pair.Local, pair.Remote, nominated: true);
                         return true;
                     }
+                    Trace($"nomination failed local={pair.Local.Address}:{pair.Local.Port} remote={remoteEp} response={nomination?.Type.ToString() ?? "null"}");
                 }
-
-                Trace($"pair failed local={pair.Local.Address}:{pair.Local.Port} remote={remoteEp} response={response?.Type.ToString() ?? "null"}");
-                pair.State = IceState.Failed;
+                else
+                {
+                    pair.State = IceState.Connected;
+                    SelectPair(transport, pair.Local, pair.Remote, nominated: false);
+                    return true;
+                }
             }
 
             if (State != IceState.Connected && State != IceState.Completed)
@@ -676,11 +879,66 @@ public class IceAgent : IIceAgent
                 State = IceState.Failed;
             }
 
-            return State == IceState.Connected || State == IceState.Completed;
+            bool success = State == IceState.Connected || State == IceState.Completed;
+            _logger?.LogInformation("IceAgent.ConnectAsync exiting (state={State}, success={Success})", State, success);
+            return success;
         }
         finally
         {
             _connectGate.Release();
+        }
+    }
+
+    private async Task<(IceUdpTransport Transport, IceCandidatePair Pair, IPEndPoint RemoteEp)?> TryPairCheckAsync(IceCandidatePair pair, CancellationToken cancellationToken)
+    {
+        try
+        {
+            pair.State = IceState.Checking;
+            var transport = GetTransportForLocalCandidate(pair.Local);
+            if (transport == null)
+            {
+                return null;
+            }
+
+            var remoteEp = await ResolveRemoteEndPointAsync(pair.Remote, cancellationToken).ConfigureAwait(false);
+            if (remoteEp == null)
+            {
+                Trace($"pair unresolved local={pair.Local} remote={pair.Remote}");
+                pair.State = IceState.Failed;
+                return null;
+            }
+
+            _logger?.LogInformation("IceAgent checking pair local={Local} remote={Remote}", $"{pair.Local.Address}:{pair.Local.Port}", remoteEp);
+            var response = await SendStunBindingRequestAsync(transport, remoteEp, cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (IsRoleConflictResponse(response))
+            {
+                pair.State = IceState.New;
+                response = await SendStunBindingRequestAsync(transport, remoteEp, cancellationToken: cancellationToken).ConfigureAwait(false);
+            }
+
+            if (response?.Type == StunMessageType.BindingSuccessResponse)
+            {
+                return (transport, pair, remoteEp);
+            }
+
+            _logger?.LogInformation("IceAgent pair failed local={Local} remote={Remote} response={Response}", $"{pair.Local.Address}:{pair.Local.Port}", remoteEp, response?.Type.ToString() ?? "null");
+            pair.State = IceState.Failed;
+            return null;
+        }
+        catch (OperationCanceledException)
+        {
+            pair.State = IceState.Failed;
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // One unreachable pair (e.g. IPv6 link-local to a global, or a host that
+            // the OS routing table rejects with ENETUNREACH) must not abort the whole
+            // connectivity check. Log, mark the pair as failed, and let the other
+            // parallel checks proceed.
+            _logger?.LogInformation("IceAgent pair check threw local={Local} remote={Remote} error={Error}", $"{pair.Local.Address}:{pair.Local.Port}", pair.Remote, ex.Message);
+            pair.State = IceState.Failed;
+            return null;
         }
     }
 
@@ -734,7 +992,8 @@ public class IceAgent : IIceAgent
         await _connectGate.WaitAsync(_cts.Token).ConfigureAwait(false);
         try
         {
-            if (!IsControlling || IsSelectedPair(local, remote))
+            // Don't re-nominate if we already have a selected pair (ICE connected/completed).
+            if (!IsControlling || _selectedLocalCandidate != null || IsSelectedPair(local, remote))
             {
                 return;
             }
@@ -747,7 +1006,6 @@ public class IceAgent : IIceAgent
             }
 
             Trace($"triggered nomination local={local.Address}:{local.Port} remote={remoteEp}");
-            State = IceState.Checking;
             var response = await SendStunBindingRequestAsync(transport, remoteEp, cancellationToken: _cts.Token).ConfigureAwait(false);
             if (response?.Type != StunMessageType.BindingSuccessResponse)
             {
@@ -769,6 +1027,24 @@ public class IceAgent : IIceAgent
         {
             _connectGate.Release();
         }
+    }
+
+    /// <summary>
+    /// Sends a bare RFC 5389 Binding request — no USERNAME, no ICE role attributes,
+    /// no MESSAGE-INTEGRITY. Used for srflx candidate gathering against a STUN server,
+    /// where no ICE short-term credential has been negotiated yet.
+    /// </summary>
+    private async Task<StunMessage?> SendPlainStunBindingRequestAsync(IceUdpTransport transport, IPEndPoint remoteEp, CancellationToken cancellationToken = default)
+    {
+        var request = new StunMessage
+        {
+            Type = StunMessageType.BindingRequest,
+            TransactionId = Guid.NewGuid().ToByteArray().AsSpan(0, 12).ToArray()
+        };
+
+        request.Attributes.Add(new StunAttribute { Type = StunAttributeType.Fingerprint });
+
+        return await SendTransactionAsync(transport, remoteEp, request, key: null, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<StunMessage?> SendStunBindingRequestAsync(IceUdpTransport transport, IPEndPoint remoteEp, bool useCandidate = false, CancellationToken cancellationToken = default)
@@ -808,26 +1084,36 @@ public class IceAgent : IIceAgent
         return response;
     }
 
-    private bool ValidateStunMessage(StunMessage stun)
+    private bool ValidateStunMessage(StunMessage stun, out string failure)
     {
+        failure = string.Empty;
+
         if (stun.RawBytes == null)
         {
+            failure = "missing raw bytes";
             return false;
         }
 
         bool hasFingerprint = stun.Attributes.Any(a => a.Type == StunAttributeType.Fingerprint);
         if (hasFingerprint && !StunSecurity.ValidateFingerprint(stun.RawBytes))
         {
+            failure = "invalid fingerprint";
             return false;
         }
 
         bool hasIntegrity = stun.Attributes.Any(a => a.Type == StunAttributeType.MessageIntegrity);
         if (!hasIntegrity)
         {
-            return stun.Type != StunMessageType.BindingRequest;
+            if (stun.Type != StunMessageType.BindingRequest)
+            {
+                return true;
+            }
+
+            failure = "missing message integrity";
+            return false;
         }
 
-        return stun.Type switch
+        bool valid = stun.Type switch
         {
             StunMessageType.BindingRequest => !string.IsNullOrEmpty(LocalPassword)
                 && StunSecurity.ValidateMessageIntegrity(stun.RawBytes, System.Text.Encoding.UTF8.GetBytes(LocalPassword)),
@@ -837,6 +1123,40 @@ public class IceAgent : IIceAgent
                 && StunSecurity.ValidateMessageIntegrity(stun.RawBytes, System.Text.Encoding.UTF8.GetBytes(_remotePassword)),
             _ => true
         };
+
+        if (valid)
+        {
+            return true;
+        }
+
+        failure = stun.Type switch
+        {
+            StunMessageType.BindingRequest when string.IsNullOrEmpty(LocalPassword) => "missing local ICE password",
+            StunMessageType.BindingRequest when !string.IsNullOrEmpty(_remotePassword)
+                && StunSecurity.ValidateMessageIntegrity(stun.RawBytes, System.Text.Encoding.UTF8.GetBytes(_remotePassword)) =>
+                "invalid message integrity with local ICE password; valid with remote ICE password",
+            StunMessageType.BindingSuccessResponse or StunMessageType.BindingErrorResponse when string.IsNullOrEmpty(_remotePassword) =>
+                "missing remote ICE password",
+            StunMessageType.BindingSuccessResponse or StunMessageType.BindingErrorResponse when !string.IsNullOrEmpty(LocalPassword)
+                && StunSecurity.ValidateMessageIntegrity(stun.RawBytes, System.Text.Encoding.UTF8.GetBytes(LocalPassword)) =>
+                "invalid message integrity with remote ICE password; valid with local ICE password",
+            _ => "invalid message integrity"
+        };
+
+        return false;
+    }
+
+    private static string FormatStunAttributes(StunMessage stun)
+    {
+        return string.Join(",", stun.Attributes.Select(attr =>
+        {
+            if (attr.Type == StunAttributeType.Username)
+            {
+                return $"{attr.Type}={System.Text.Encoding.UTF8.GetString(attr.Value)}";
+            }
+
+            return attr.Type.ToString();
+        }));
     }
 
     internal bool TryResolveRoleConflict(StunMessage request)
@@ -1115,24 +1435,48 @@ public class IceAgent : IIceAgent
             return new IPEndPoint(address, candidate.Port);
         }
 
+        // Resolve hostname-based candidates (notably Firefox's `*.local` mDNS candidates) at most
+        // once per address. Windows mDNS resolution can take many seconds per call, and calling
+        // it on every outbound packet stalls the DTLS handshake — Firefox retransmits faster
+        // than we can respond. Caching collapses every subsequent send to an O(1) dictionary hit.
+        var resolveTask = _hostnameResolutionCache.GetOrAdd(candidate.Address, addr => ResolveHostnameAsync(addr, cancellationToken));
+        IPAddress? resolved;
         try
         {
-            var addresses = await Dns.GetHostAddressesAsync(candidate.Address, cancellationToken).ConfigureAwait(false);
+            resolved = await resolveTask.ConfigureAwait(false);
+        }
+        catch
+        {
+            _hostnameResolutionCache.TryRemove(candidate.Address, out _);
+            return null;
+        }
+        if (resolved == null)
+        {
+            return null;
+        }
+        return new IPEndPoint(resolved, candidate.Port);
+    }
+
+    private async Task<IPAddress?> ResolveHostnameAsync(string hostname, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var addresses = await Dns.GetHostAddressesAsync(hostname, cancellationToken).ConfigureAwait(false);
             var resolved = addresses.FirstOrDefault(ip => ip.AddressFamily == AddressFamily.InterNetwork)
                 ?? addresses.FirstOrDefault();
-            Trace($"resolved {candidate.Address} -> {resolved}");
-            return resolved == null ? null : new IPEndPoint(resolved, candidate.Port);
+            Trace($"resolved {hostname} -> {resolved}");
+            return resolved;
         }
         catch (SocketException)
         {
-            Trace($"failed to resolve {candidate.Address}");
+            Trace($"failed to resolve {hostname}");
             return null;
         }
     }
 
     private void Trace(string message)
     {
-        if (TraceEnabled && _logger?.IsEnabled(LogLevel.Debug) == true)
+        if (_logger?.IsEnabled(LogLevel.Debug) == true)
         {
             _logger.LogDebug("{Message}", message);
         }

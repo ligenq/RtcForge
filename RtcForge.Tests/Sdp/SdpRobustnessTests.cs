@@ -131,4 +131,33 @@ public class SdpRobustnessTests
         Assert.Equal(9, md.Port);
         Assert.Equal(2, md.Formats.Count);
     }
+
+    [Fact]
+    public void TryParse_IgnoresMalformedLines()
+    {
+        const string sdp = "not-a-line\r\nv=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n";
+
+        Assert.True(SdpMessage.TryParse(sdp, out var message));
+        Assert.Equal(0, message!.Version);
+    }
+
+    [Fact]
+    public void SdpOrigin_Parse_InvalidInput_Throws()
+    {
+        Assert.Throws<FormatException>(() => SdpOrigin.Parse("bad"));
+    }
+
+    [Fact]
+    public void SdpTiming_TryParseAndParse_InvalidInputsFail()
+    {
+        Assert.False(SdpTiming.TryParse("0", out _));
+        Assert.False(SdpTiming.TryParse("abc 0", out _));
+        Assert.Throws<FormatException>(() => SdpTiming.Parse("abc"));
+    }
+
+    [Fact]
+    public void SdpMediaDescription_Parse_InvalidInput_Throws()
+    {
+        Assert.Throws<FormatException>(() => SdpMediaDescription.Parse("audio 9"));
+    }
 }

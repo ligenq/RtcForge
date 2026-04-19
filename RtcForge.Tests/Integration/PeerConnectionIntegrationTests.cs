@@ -1,6 +1,7 @@
 using RtcForge.Media;
 using RtcForge.Ice;
 using RtcForge.Rtp;
+using RtcForge.Dtls;
 using System.Reflection;
 using System.Net;
 
@@ -74,6 +75,32 @@ public class PeerConnectionIntegrationTests
     }
 
     [Fact]
+    public async Task AddTrack_ReusesCompatibleRemoteRecvOnlyTransceiver()
+    {
+        using var pc = new RTCPeerConnection();
+        var offer = RtcForge.Sdp.SdpMessage.Parse(
+            "v=0\r\n" +
+            "o=- 1 1 IN IP4 127.0.0.1\r\n" +
+            "s=-\r\n" +
+            "t=0 0\r\n" +
+            "a=ice-ufrag:ufrag\r\n" +
+            "a=ice-pwd:password\r\n" +
+            "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" +
+            "c=IN IP4 0.0.0.0\r\n" +
+            "a=mid:0\r\n" +
+            "a=recvonly\r\n" +
+            "a=rtpmap:111 opus/48000/2\r\n");
+        await pc.SetRemoteDescriptionAsync(offer);
+        var transceiver = Assert.Single(pc.GetTransceivers());
+
+        var sender = pc.AddTrack(new AudioStreamTrack());
+
+        Assert.Same(transceiver.Sender, sender);
+        Assert.NotNull(sender.Track);
+        Assert.Single(pc.GetTransceivers());
+    }
+
+    [Fact]
     public async Task CreateOfferAsync_WithDataChannel_IncludesApplicationMediaSection()
     {
         using var pc = new RTCPeerConnection();
@@ -86,6 +113,33 @@ public class PeerConnectionIntegrationTests
         Assert.Equal("webrtc-datachannel", Assert.Single(application.Formats));
         Assert.Contains(application.Attributes, a => a.Name == "sctp-port" && a.Value == "5000");
         Assert.Contains(application.Attributes, a => a.Name == "max-message-size" && a.Value == "262144");
+    }
+
+    [Fact]
+    public void CreateDataChannel_BeforeNegotiation_AllocatesEvenStreamIds()
+    {
+        using var pc = new RTCPeerConnection();
+
+        var first = pc.CreateDataChannel("first");
+        var second = pc.CreateDataChannel("second");
+
+        Assert.Equal((ushort)0, first.Id);
+        Assert.Equal((ushort)2, second.Id);
+    }
+
+    [Fact]
+    public async Task CreateDataChannel_AfterRemoteOffer_AllocatesOddStreamIds()
+    {
+        using var offerer = new RTCPeerConnection();
+        using var answerer = new RTCPeerConnection();
+
+        offerer.CreateDataChannel("offered");
+        var offer = await offerer.CreateOfferAsync();
+        await answerer.SetRemoteDescriptionAsync(offer);
+
+        var channel = answerer.CreateDataChannel("answerer");
+
+        Assert.Equal((ushort)1, channel.Id);
     }
 
     [Fact]
@@ -103,6 +157,47 @@ public class PeerConnectionIntegrationTests
         Assert.Contains(audio.Attributes, a => a.Name == "rtcp-mux");
         Assert.Contains(audio.Attributes, a => a.Name == "rtcp-rsize");
         Assert.Contains(audio.Attributes, a => a.Name == "fmtp" && a.Value == "111 minptime=10;useinbandfec=1");
+    }
+
+    [Fact]
+    public async Task CreateOfferAsync_WithVideoTrack_UsesDefaultVp8Feedback()
+    {
+        using var pc = new RTCPeerConnection();
+
+        pc.AddTrack(new VideoStreamTrack());
+        var offer = await pc.CreateOfferAsync();
+        var video = Assert.Single(offer.MediaDescriptions, md => md.Media == "video");
+
+        Assert.Contains("96", video.Formats);
+        Assert.Contains(video.Attributes, a => a.Name == "rtpmap" && a.Value == "96 VP8/90000");
+        Assert.Contains(video.Attributes, a => a.Name == "rtcp-fb" && a.Value == "96 nack");
+        Assert.Contains(video.Attributes, a => a.Name == "rtcp-fb" && a.Value == "96 nack pli");
+    }
+
+    [Theory]
+    [InlineData("sendonly", RTCRtpTransceiverDirection.RecvOnly)]
+    [InlineData("recvonly", RTCRtpTransceiverDirection.Inactive)]
+    [InlineData("inactive", RTCRtpTransceiverDirection.Inactive)]
+    public async Task CreateAnswerAsync_ResolvesRemoteOfferDirection(string remoteDirection, RTCRtpTransceiverDirection expectedAnswerDirection)
+    {
+        using var pc = new RTCPeerConnection();
+        var offer = RtcForge.Sdp.SdpMessage.Parse(
+            "v=0\r\n" +
+            "o=- 1 1 IN IP4 127.0.0.1\r\n" +
+            "s=-\r\n" +
+            "t=0 0\r\n" +
+            "a=ice-ufrag:ufrag\r\n" +
+            "a=ice-pwd:password\r\n" +
+            "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" +
+            "c=IN IP4 0.0.0.0\r\n" +
+            "a=mid:0\r\n" +
+            $"a={remoteDirection}\r\n" +
+            "a=rtpmap:111 opus/48000/2\r\n");
+        await pc.SetRemoteDescriptionAsync(offer);
+
+        var answer = await pc.CreateAnswerAsync();
+
+        Assert.Contains(answer.MediaDescriptions[0].Attributes, a => a.Name == expectedAnswerDirection.ToString().ToLowerInvariant());
     }
 
     [Fact]
@@ -210,5 +305,80 @@ public class PeerConnectionIntegrationTests
         // If we reached here without exception, and the transport was set, the logic is covered.
         var transceiver = pc.GetTransceivers().First();
         Assert.NotNull(transceiver.Sender.Transport);
+    }
+
+    [Theory]
+    [InlineData("pli")]
+    [InlineData("fir")]
+    public void HandleIncomingRtcpPacket_DispatchesPictureLossFeedbackToSender(string feedbackType)
+    {
+        using var pc = new RTCPeerConnection();
+        var sender = pc.AddTrack(new VideoStreamTrack());
+        var transceiver = Assert.Single(pc.GetTransceivers());
+        var publicTransport = new RTCDtlsTransport(new FakeDtlsTransport(), new RTCIceTransport());
+        transceiver.Sender.Transport = publicTransport;
+        var pictureLossCount = 0;
+        sender.OnPictureLoss += (_, _) => pictureLossCount++;
+
+        RtcpPacket feedback = feedbackType == "pli"
+            ? new RtcpPliPacket { SenderSsrc = 1, MediaSsrc = 2 }
+            : new RtcpFirPacket { SenderSsrc = 1, MediaSsrc = 2, SequenceNumber = 9 };
+        byte[] buffer = new byte[feedback.GetSerializedLength()];
+        feedback.Serialize(buffer);
+        var udpPacket = new UdpPacket
+        {
+            Array = buffer,
+            Length = buffer.Length,
+            RemoteEndPoint = new IPEndPoint(IPAddress.Loopback, 1234)
+        };
+
+        var handleIncomingRtcpPacket = typeof(RTCPeerConnection)
+            .GetMethod("HandleIncomingRtcpPacket", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        handleIncomingRtcpPacket.Invoke(pc, [null, udpPacket]);
+
+        Assert.Equal(1, pictureLossCount);
+    }
+
+    [Fact]
+    public void HandleIncomingRtcpPacket_WithNoTransportedSender_DoesNotDispatchFeedback()
+    {
+        using var pc = new RTCPeerConnection();
+        var sender = pc.AddTrack(new VideoStreamTrack());
+        var pictureLossCount = 0;
+        sender.OnPictureLoss += (_, _) => pictureLossCount++;
+        var pli = new RtcpPliPacket { SenderSsrc = 1, MediaSsrc = 2 };
+        byte[] buffer = new byte[pli.GetSerializedLength()];
+        pli.Serialize(buffer);
+        var udpPacket = new UdpPacket
+        {
+            Array = buffer,
+            Length = buffer.Length,
+            RemoteEndPoint = new IPEndPoint(IPAddress.Loopback, 1234)
+        };
+
+        var handleIncomingRtcpPacket = typeof(RTCPeerConnection)
+            .GetMethod("HandleIncomingRtcpPacket", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        handleIncomingRtcpPacket.Invoke(pc, [null, udpPacket]);
+
+        Assert.Equal(0, pictureLossCount);
+    }
+
+    private sealed class FakeDtlsTransport : IDtlsTransport
+    {
+        public DtlsState State => DtlsState.New;
+        public event EventHandler<DtlsState>? OnStateChange { add { } remove { } }
+        public event EventHandler<byte[]>? OnData;
+        public Task StartAsync(bool isClient) => Task.CompletedTask;
+        public Task SendAsync(byte[] data)
+        {
+            OnData?.Invoke(this, data);
+            return Task.CompletedTask;
+        }
+        public void SetRemoteFingerprint(string algorithm, string fingerprint) { }
+        public SrtpKeys? GetSrtpKeys() => null;
+        public void Dispose()
+        {
+            OnData = null;
+        }
     }
 }

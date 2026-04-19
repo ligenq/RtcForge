@@ -7,6 +7,52 @@ namespace RtcForge.Tests.Integration;
 public class CancellationAndTimeoutTests
 {
     [Fact]
+    public async Task CreateOfferAsync_SerializesIceCandidatesWithoutDuplicatePrefix()
+    {
+        using var pc = new RTCPeerConnection();
+
+        var offer = await pc.CreateOfferAsync();
+        string sdp = offer.ToString();
+
+        Assert.DoesNotContain("a=candidate:candidate:", sdp);
+    }
+
+    [Fact]
+    public async Task SetRemoteDescriptionAsync_WithSdpCandidate_StartsIceChecks()
+    {
+        using var pc = new RTCPeerConnection();
+
+        var offer = await pc.CreateOfferAsync();
+        await pc.SetLocalDescriptionAsync(offer);
+
+        var remote = RtcForge.Sdp.SdpMessage.Parse(
+            "v=0\r\n" +
+            "o=- 1 1 IN IP4 127.0.0.1\r\n" +
+            "s=-\r\n" +
+            "t=0 0\r\n" +
+            "a=ice-ufrag:remoteufrag\r\n" +
+            "a=ice-pwd:remotepasswordremotepassword\r\n" +
+            "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" +
+            "c=IN IP4 0.0.0.0\r\n" +
+            "a=mid:0\r\n" +
+            "a=candidate:1 1 udp 2130706431 127.0.0.1 9 typ host\r\n");
+
+        var iceAgent = (IceAgent)typeof(RTCPeerConnection)
+            .GetField("_iceAgent", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(pc)!;
+
+        await pc.SetRemoteDescriptionAsync(remote);
+
+        for (int i = 0; i < 50 && iceAgent.State is IceState.New or IceState.Complete; i++)
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(20), TimeProvider.System);
+        }
+
+        Assert.NotEqual(IceState.New, iceAgent.State);
+        Assert.NotEqual(IceState.Complete, iceAgent.State);
+    }
+
+    [Fact]
     public async Task ConnectAsync_CancellationToken_HonorsCancellation()
     {
         using var pcA = new RTCPeerConnection();

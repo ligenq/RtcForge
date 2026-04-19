@@ -164,12 +164,13 @@ public class StunMessage
                     throw new ArgumentNullException(nameof(integrityKey));
                 }
 
+                // RFC 5389: the length includes MESSAGE-INTEGRITY, but the HMAC input
+                // excludes the MESSAGE-INTEGRITY attribute itself.
+                SetMessageLength(buffer, offset + 24);
+                byte[] hmac = StunSecurity.CalculateMessageIntegrity(buffer[..offset], integrityKey);
                 BinaryPrimitives.WriteUInt16BigEndian(buffer.Slice(offset, 2), (ushort)attr.Type);
                 BinaryPrimitives.WriteUInt16BigEndian(buffer.Slice(offset + 2, 2), 20);
                 offset += 4;
-                // RFC 5389: set length as if MessageIntegrity were the last attribute
-                SetMessageLength(buffer, offset + 20);
-                byte[] hmac = StunSecurity.CalculateMessageIntegrity(buffer[..offset], integrityKey);
                 hmac.CopyTo(buffer.Slice(offset, 20));
                 offset += 20;
                 continue;
@@ -177,12 +178,13 @@ public class StunMessage
 
             if (attr.Type == StunAttributeType.Fingerprint)
             {
+                // RFC 5389: the length includes FINGERPRINT, but the CRC input excludes
+                // the FINGERPRINT attribute itself.
+                SetMessageLength(buffer, offset + 8);
+                uint crc = StunSecurity.CalculateFingerprint(buffer[..offset]);
                 BinaryPrimitives.WriteUInt16BigEndian(buffer.Slice(offset, 2), (ushort)attr.Type);
                 BinaryPrimitives.WriteUInt16BigEndian(buffer.Slice(offset + 2, 2), 4);
                 offset += 4;
-                // RFC 5389: set length as if Fingerprint were the last attribute
-                SetMessageLength(buffer, offset + 4);
-                uint crc = StunSecurity.CalculateFingerprint(buffer[..offset]);
                 BinaryPrimitives.WriteUInt32BigEndian(buffer.Slice(offset, 4), crc);
                 offset += 4;
                 continue;

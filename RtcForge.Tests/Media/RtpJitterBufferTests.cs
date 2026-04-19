@@ -94,4 +94,33 @@ public class RtpJitterBufferTests
         Assert.NotNull(packet);
         Assert.Equal((ushort)3, packet.SequenceNumber); // 2 was skipped
     }
+
+    [Fact]
+    public void Push_WhenOverCapacity_EvictsOldestPackets()
+    {
+        var buffer = new RtpJitterBuffer(maxPackets: 2);
+
+        buffer.Push(new RtpPacket { SequenceNumber = 1 });
+        buffer.Push(new RtpPacket { SequenceNumber = 2 });
+        buffer.Push(new RtpPacket { SequenceNumber = 3 });
+
+        Assert.Equal(2, buffer.Count);
+        Assert.Equal((ushort)2, buffer.Pop()?.SequenceNumber);
+        Assert.Equal((ushort)3, buffer.Pop()?.SequenceNumber);
+    }
+
+    [Fact]
+    public void Clear_RemovesBufferedPacketsAndResetsSequenceState()
+    {
+        var buffer = new RtpJitterBuffer();
+        buffer.Push(new RtpPacket { SequenceNumber = 10 });
+        Assert.Equal((ushort)10, buffer.Pop()?.SequenceNumber);
+
+        buffer.Push(new RtpPacket { SequenceNumber = 11 });
+        buffer.Clear();
+        buffer.Push(new RtpPacket { SequenceNumber = 5 });
+
+        Assert.Equal(1, buffer.Count);
+        Assert.Equal((ushort)5, buffer.Pop()?.SequenceNumber);
+    }
 }

@@ -107,9 +107,11 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
     private RTCDtlsTransport? _publicDtlsTransport;
     private volatile Srtp.SrtpSession? _srtpSession;
     private int _dtlsInitialized;
+    private readonly ConcurrentQueue<byte[]> _earlyDtlsPackets = new();
     private readonly ConcurrentDictionary<byte, RTCRtpTransceiver> _remotePayloadTypeMap = new();
     private string? _dataChannelMid;
     private bool _dataChannelNegotiated;
+    private ushort? _nextDataChannelId;
     private readonly ILoggerFactory? _loggerFactory;
     private readonly ILogger<RTCPeerConnection>? _logger;
     private readonly TimeProvider _timeProvider;
@@ -177,7 +179,20 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
         }
         _iceAgent.OnLocalCandidate += (s, c) => OnIceCandidate?.Invoke(this, c);
         _iceAgent.OnStateChange += HandleIceStateChange;
-        _iceAgent.OnDtlsPacket += (s, p) => _dtlsTransport?.HandleIncomingPacket(p.Span.ToArray());
+        _iceAgent.OnDtlsPacket += (s, p) =>
+        {
+            var data = p.Span.ToArray();
+            var transport = _dtlsTransport;
+            _logger?.LogDebug("RTCPeerConnection received DTLS packet bytes={Bytes} transportReady={TransportReady}", data.Length, transport != null);
+            if (transport != null)
+            {
+                transport.HandleIncomingPacket(data);
+            }
+            else
+            {
+                _earlyDtlsPackets.Enqueue(data);
+            }
+        };
         _iceAgent.OnRtpPacket += HandleIncomingRtpPacket;
         _iceAgent.OnRtcpPacket += HandleIncomingRtcpPacket;
         _dtlsCertificate = DtlsCertificate.Generate(_timeProvider);
@@ -185,7 +200,17 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
 
     private void HandleIncomingRtcpPacket(object? sender, UdpPacket packet)
     {
-        var rtcpPackets = RtcpPacket.ParseCompound(packet.Span);
+        ReadOnlyMemory<byte> rtcpData = packet.Data;
+        var srtp = _srtpSession;
+        if (srtp != null)
+        {
+            if (!srtp.UnprotectRtcp(packet.Data, out rtcpData))
+            {
+                return;
+            }
+        }
+
+        var rtcpPackets = RtcpPacket.ParseCompound(rtcpData.Span);
         foreach (var rtcp in rtcpPackets)
         {
             RTCRtpTransceiver? transceiver;
@@ -218,7 +243,26 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
             int length = packet.Serialize(buffer);
             if (length > 0)
             {
-                await _iceAgent.SendDataAsync(buffer.AsMemory(0, length)).ConfigureAwait(false);
+                var srtp = _srtpSession;
+                if (srtp != null)
+                {
+                    byte[] protectedBuffer = ArrayPool<byte>.Shared.Rent(length + 14);
+                    try
+                    {
+                        if (srtp.ProtectRtcp(buffer.AsSpan(0, length), protectedBuffer, out int protectedLength))
+                        {
+                            await _iceAgent.SendDataAsync(protectedBuffer.AsMemory(0, protectedLength)).ConfigureAwait(false);
+                        }
+                    }
+                    finally
+                    {
+                        ArrayPool<byte>.Shared.Return(protectedBuffer);
+                    }
+                }
+                else
+                {
+                    await _iceAgent.SendDataAsync(buffer.AsMemory(0, length)).ConfigureAwait(false);
+                }
             }
         }
         finally
@@ -315,7 +359,7 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
         RTCDataChannel dc;
         lock (_dataChannelLock)
         {
-            ushort id = (ushort)(_dataChannels.Count + 1);
+            ushort id = AllocateDataChannelId();
             dc = new RTCDataChannel(label, id, _sctpAssociation);
             _dataChannels.Add(dc);
         }
@@ -329,9 +373,48 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
         return dc;
     }
 
+    private ushort AllocateDataChannelId()
+    {
+        bool useEven = ShouldUseEvenDataChannelIds();
+        ushort current = _nextDataChannelId ?? (ushort)(useEven ? 0 : 1);
+        _nextDataChannelId = (ushort)(current + 2);
+        return current;
+    }
+
+    private bool ShouldUseEvenDataChannelIds()
+    {
+        SdpMessage? localDesc, remoteDesc;
+        lock (_stateLock)
+        {
+            localDesc = _localDescription;
+            remoteDesc = _remoteDescription;
+        }
+
+        if (localDesc == null && remoteDesc == null)
+        {
+            return true;
+        }
+
+        if (localDesc == null && remoteDesc != null)
+        {
+            return false;
+        }
+
+        return ResolveDtlsClientRole();
+    }
+
     private async Task InitializeDtlsAsync(bool isClient)
     {
+        _logger?.LogInformation("Initializing DTLS as {Role}", isClient ? "client" : "server");
         _dtlsTransport = new DtlsTransport(_iceAgent.SendDataAsync, _dtlsCertificate, _loggerFactory);
+
+        // Flush any DTLS packets that arrived before _dtlsTransport was set.
+        while (_earlyDtlsPackets.TryDequeue(out var early))
+        {
+            _logger?.LogDebug("Flushing early DTLS packet bytes={Bytes}", early.Length);
+            _dtlsTransport.HandleIncomingPacket(early);
+        }
+
         var publicTransport = new RTCDtlsTransport(_dtlsTransport, new RTCIceTransport());
         _publicDtlsTransport = publicTransport;
 
@@ -354,19 +437,24 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
             .SelectMany(md => md.Attributes)
             .FirstOrDefault(a => a.Name == "fingerprint")
             ?.Value;
-        if (fingerprintAttr != null)
+        if (string.IsNullOrWhiteSpace(fingerprintAttr))
         {
-            var parts = fingerprintAttr.Split(' ', 2);
-            if (parts.Length == 2)
-            {
-                _dtlsTransport.SetRemoteFingerprint(parts[0], parts[1]);
-            }
+            throw new InvalidOperationException("Remote DTLS fingerprint not set");
         }
+
+        var parts = fingerprintAttr.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 2)
+        {
+            throw new InvalidOperationException("Remote DTLS fingerprint is invalid");
+        }
+
+        _dtlsTransport.SetRemoteFingerprint(parts[0], parts[1]);
 
         _dtlsTransport.OnStateChange += async (s, state) =>
         {
             if (state == DtlsState.Connected)
             {
+                _logger?.LogInformation("DTLS connected");
                 try
                 {
                     var keys = _dtlsTransport.GetSrtpKeys();
@@ -377,6 +465,7 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
 
                     if (ShouldNegotiateDataChannels())
                     {
+                        _logger?.LogInformation("Initializing SCTP for data channels as {Role}", isClient ? "client" : "server");
                         await InitializeSctpAsync(isClient);
                     }
                 }
@@ -388,6 +477,7 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
             }
             else if (state == DtlsState.Failed)
             {
+                _logger?.LogWarning("DTLS failed");
                 TransitionToFailed();
             }
         };
@@ -396,6 +486,7 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
 
     private Task HandleIncomingDtlsApplicationDataAsync(byte[] data)
     {
+        _logger?.LogDebug("DTLS application data received bytes={Bytes} sctpReady={SctpReady}", data.Length, _sctpAssociation != null);
         return _sctpAssociation?.HandlePacketAsync(data) ?? Task.CompletedTask;
     }
 
@@ -410,25 +501,29 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
 
         _sctpAssociation.OnRemoteDataChannel += (s, dc) =>
         {
+            _logger?.LogInformation("Remote data channel opened label={Label} id={Id}", dc.Label, dc.Id);
             lock (_dataChannelLock) { _dataChannels.Add(dc); }
             OnDataChannel?.Invoke(this, dc);
         };
 
         _sctpAssociation.OnEstablished += (s, e) =>
         {
-            if (isClient)
+            _logger?.LogInformation("SCTP association established");
+            List<RTCDataChannel> snapshot;
+            lock (_dataChannelLock) { snapshot = _dataChannels.ToList(); }
+            foreach (var dc in snapshot)
             {
-                List<RTCDataChannel> snapshot;
-                lock (_dataChannelLock) { snapshot = _dataChannels.ToList(); }
-                foreach (var dc in snapshot)
+                dc.SetAssociation(_sctpAssociation!);
+                _sctpAssociation!.RegisterDataChannel(dc);
+                if (dc.ReadyState == RTCDataChannelState.Connecting)
                 {
-                    dc.SetAssociation(_sctpAssociation!);
-                    _sctpAssociation!.RegisterDataChannel(dc);
+                    _logger?.LogDebug("Sending DCEP open for local data channel label={Label} id={Id}", dc.Label, dc.Id);
                     _sctpAssociation!.SendDataAsync(dc.Id, 50, new Sctp.DcepMessage { Type = Sctp.DcepMessageType.DataChannelOpen, Label = dc.Label }.Serialize()).FireAndForget();
                 }
             }
         };
 
+        _logger?.LogInformation("Starting SCTP association as {Role}", isClient ? "client" : "server");
         await _sctpAssociation.StartAsync(isClient);
     }
 
@@ -570,7 +665,7 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
 
         foreach (var attr in description.Attributes.Where(a => a.Name == "candidate"))
         {
-            _iceAgent.AddRemoteCandidate(IceCandidate.Parse(attr.Value!));
+            _iceAgent.AddRemoteCandidate(IceCandidate.Parse(attr.Value!), kickConnect: false);
         }
 
         foreach (var md in description.MediaDescriptions)
@@ -585,10 +680,11 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
             }
             foreach (var attr in md.Attributes.Where(a => a.Name == "candidate"))
             {
-                _iceAgent.AddRemoteCandidate(IceCandidate.Parse(attr.Value!));
+                _iceAgent.AddRemoteCandidate(IceCandidate.Parse(attr.Value!), kickConnect: false);
             }
         }
 
+        _iceAgent.KickConnectIfReady();
         return Task.CompletedTask;
     }
 
@@ -995,7 +1091,13 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
     {
         foreach (var candidate in _iceAgent.LocalCandidates)
         {
-            mediaDescription.Attributes.Add(new SdpAttribute { Name = "candidate", Value = candidate.ToString() });
+            var candidateValue = candidate.ToString();
+            if (candidateValue.StartsWith("candidate:", StringComparison.OrdinalIgnoreCase))
+            {
+                candidateValue = candidateValue["candidate:".Length..];
+            }
+
+            mediaDescription.Attributes.Add(new SdpAttribute { Name = "candidate", Value = candidateValue });
         }
 
         if (_iceAgent.LocalCandidates.Count > 0)

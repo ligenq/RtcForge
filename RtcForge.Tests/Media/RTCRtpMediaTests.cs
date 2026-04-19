@@ -188,4 +188,18 @@ public class RTCRtpMediaTests
 
         Assert.Equal(RTCRtpTransceiverDirection.SendRecv, transceiver.Direction);
     }
+
+    [Fact]
+    public void RTCTrackEvent_ExposesConstructorArguments()
+    {
+        var sender = new RTCRtpSender(new AudioStreamTrack(), _ => Task.CompletedTask);
+        var receiver = new RTCRtpReceiver(new VideoStreamTrack(), _ => Task.CompletedTask);
+        var transceiver = new RTCRtpTransceiver(sender, receiver);
+
+        var trackEvent = new RTCTrackEvent(receiver, receiver.Track, transceiver);
+
+        Assert.Same(receiver, trackEvent.Receiver);
+        Assert.Same(receiver.Track, trackEvent.Track);
+        Assert.Same(transceiver, trackEvent.Transceiver);
+    }
 }

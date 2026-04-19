@@ -188,6 +188,139 @@ public class TurnAllocationTests
         Assert.Equal(TimeSpan.FromSeconds(120), allocation.AllocationLifetime);
     }
 
+    [Fact]
+    public async Task SendToPeerAsync_ReusesExistingBindingForSamePeer()
+    {
+        var requests = new List<StunMessageType>();
+        var rawPackets = new List<byte[]>();
+        using var allocation = CreateAllocation(
+            (request, _) =>
+            {
+                requests.Add(request.Type);
+                return Task.FromResult<StunMessage?>(new StunMessage
+                {
+                    Type = request.Type switch
+                    {
+                        StunMessageType.CreatePermissionRequest => StunMessageType.CreatePermissionSuccessResponse,
+                        StunMessageType.ChannelBindRequest => StunMessageType.ChannelBindSuccessResponse,
+                        _ => throw new InvalidOperationException()
+                    },
+                    TransactionId = request.TransactionId
+                });
+            },
+            packet =>
+            {
+                rawPackets.Add(packet);
+                return Task.CompletedTask;
+            });
+        var peer = new IPEndPoint(IPAddress.Parse("198.51.100.20"), 51413);
+
+        await allocation.SendToPeerAsync([1], peer);
+        await allocation.SendToPeerAsync([2], peer);
+
+        Assert.Equal([StunMessageType.CreatePermissionRequest, StunMessageType.ChannelBindRequest], requests);
+        Assert.Equal(2, rawPackets.Count);
+        Assert.Equal(0x4000, BinaryPrimitives.ReadUInt16BigEndian(rawPackets[0].AsSpan(0, 2)));
+        Assert.Equal(0x4000, BinaryPrimitives.ReadUInt16BigEndian(rawPackets[1].AsSpan(0, 2)));
+    }
+
+    [Fact]
+    public async Task SendToPeerAsync_CanceledToken_ThrowsBeforeSending()
+    {
+        using var allocation = CreateAllocation((_, _) => throw new InvalidOperationException("should not send"), _ => Task.CompletedTask);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => allocation.SendToPeerAsync([1], new IPEndPoint(IPAddress.Loopback, 1234), cts.Token));
+    }
+
+    [Fact]
+    public async Task RefreshAllocationAsync_ErrorWithoutStaleNonce_ThrowsReason()
+    {
+        using var allocation = CreateAllocation(
+            (request, _) => Task.FromResult<StunMessage?>(new StunMessage
+            {
+                Type = StunMessageType.RefreshErrorResponse,
+                Attributes = { CreateErrorCodeAttribute(401, "Unauthorized") }
+            }),
+            _ => Task.CompletedTask);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => allocation.RefreshAllocationAsync());
+
+        Assert.Equal("Unauthorized", ex.Message);
+    }
+
+    [Fact]
+    public async Task RefreshAllocationAsync_NullOrUnexpectedResponse_Throws()
+    {
+        using var noResponse = CreateAllocation((_, _) => Task.FromResult<StunMessage?>(null), _ => Task.CompletedTask);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => noResponse.RefreshAllocationAsync());
+
+        using var unexpected = CreateAllocation(
+            (_, _) => Task.FromResult<StunMessage?>(new StunMessage { Type = StunMessageType.BindingSuccessResponse }),
+            _ => Task.CompletedTask);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => unexpected.RefreshAllocationAsync());
+    }
+
+    [Fact]
+    public async Task RefreshAllocationAsync_StaleNonceWithoutNonce_DoesNotRetry()
+    {
+        using var allocation = CreateAllocation(
+            (_, _) => Task.FromResult<StunMessage?>(new StunMessage
+            {
+                Type = StunMessageType.RefreshErrorResponse,
+                Attributes = { CreateErrorCodeAttribute(438, "Stale Nonce") }
+            }),
+            _ => Task.CompletedTask);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => allocation.RefreshAllocationAsync());
+
+        Assert.Equal("Stale Nonce", ex.Message);
+    }
+
+    [Fact]
+    public void TryTranslateIncoming_NonServerOrMalformedPackets_ReturnFalse()
+    {
+        using var allocation = CreateAllocation((_, _) => Task.FromResult<StunMessage?>(null), _ => Task.CompletedTask);
+
+        Assert.False(allocation.TryTranslateIncoming(new UdpPacket
+        {
+            Array = [0x40, 0, 0, 0],
+            Length = 4,
+            RemoteEndPoint = new IPEndPoint(IPAddress.Parse("127.0.0.2"), 3478)
+        }, out _));
+
+        Assert.False(allocation.TryTranslateIncoming(new UdpPacket
+        {
+            Array = [0x40, 0, 0, 1, 9],
+            Length = 5,
+            RemoteEndPoint = new IPEndPoint(IPAddress.Parse("127.0.0.1"), 3478)
+        }, out _));
+
+        Assert.False(allocation.TryTranslateIncoming(new UdpPacket
+        {
+            Array = [0x40, 0, 0, 1, 9],
+            Length = 5,
+            RemoteEndPoint = new IPEndPoint(IPAddress.Parse("127.0.0.1"), 3478)
+        }, out _));
+
+        Assert.False(allocation.TryTranslateIncoming(new UdpPacket
+        {
+            Array = [0x00, 0x01, 0, 0],
+            Length = 4,
+            RemoteEndPoint = new IPEndPoint(IPAddress.Parse("127.0.0.1"), 3478)
+        }, out _));
+    }
+
+    [Fact]
+    public void Dispose_CanBeCalledTwice()
+    {
+        var allocation = CreateAllocation((_, _) => Task.FromResult<StunMessage?>(null), _ => Task.CompletedTask);
+
+        allocation.Dispose();
+        allocation.Dispose();
+    }
+
     private static TurnAllocation CreateAllocation(
         Func<StunMessage, byte[]?, Task<StunMessage?>> sendRequestAsync,
         Func<byte[], Task> sendRawAsync)

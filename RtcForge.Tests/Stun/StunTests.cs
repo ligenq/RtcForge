@@ -96,4 +96,74 @@ public class StunTests
         Assert.True(StunSecurity.ValidateMessageIntegrity(parsed.RawBytes!, key));
         Assert.True(StunSecurity.ValidateFingerprint(parsed.RawBytes!));
     }
+
+    [Fact]
+    public void TryParse_InvalidHeaderFields_ReturnFalse()
+    {
+        byte[] buffer = new byte[20];
+        buffer[4] = 0x21; buffer[5] = 0x12; buffer[6] = 0xA4; buffer[7] = 0x42;
+
+        Assert.False(StunMessage.TryParse(buffer.AsSpan(0, 19), out _));
+
+        buffer[0] = 0xC0;
+        Assert.False(StunMessage.TryParse(buffer, out _));
+
+        buffer[0] = 0;
+        buffer[2] = 0; buffer[3] = 4;
+        Assert.False(StunMessage.TryParse(buffer, out _));
+
+        buffer[2] = 0; buffer[3] = 0;
+        buffer[4] = 0;
+        Assert.False(StunMessage.TryParse(buffer, out _));
+    }
+
+    [Fact]
+    public void TryParse_TruncatedAttributeStopsParsingButKeepsMessage()
+    {
+        byte[] buffer = new byte[24];
+        buffer[1] = 0x01;
+        buffer[3] = 0x04;
+        buffer[4] = 0x21; buffer[5] = 0x12; buffer[6] = 0xA4; buffer[7] = 0x42;
+        buffer[20] = 0x00; buffer[21] = 0x06;
+        buffer[22] = 0x00; buffer[23] = 0x08;
+
+        Assert.True(StunMessage.TryParse(buffer, out var message));
+        Assert.Empty(message.Attributes);
+    }
+
+    [Fact]
+    public void Serialize_WithTooSmallBuffer_ReturnsMinusOne()
+    {
+        var message = new StunMessage
+        {
+            Type = StunMessageType.BindingRequest,
+            TransactionId = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            Attributes = { new StunAttribute { Type = StunAttributeType.Username, Value = System.Text.Encoding.UTF8.GetBytes("test") } }
+        };
+
+        Assert.Equal(-1, message.Serialize(new byte[message.GetSerializedLength() - 1]));
+    }
+
+    [Fact]
+    public void Serialize_MessageIntegrityWithoutKey_Throws()
+    {
+        var message = new StunMessage
+        {
+            Type = StunMessageType.BindingRequest,
+            TransactionId = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            Attributes = { new StunAttribute { Type = StunAttributeType.MessageIntegrity } }
+        };
+
+        Assert.Throws<ArgumentNullException>(() => message.Serialize(new byte[message.GetSerializedLength()]));
+    }
+
+    [Fact]
+    public void AttributeHelpers_InvalidTypeOrLength_ReturnNull()
+    {
+        Assert.Null(new StunAttribute { Type = StunAttributeType.Username, Value = [0, 1, 2, 3, 4, 5, 6, 7] }.GetXorMappedAddress(new byte[12]));
+        Assert.Null(new StunAttribute { Type = StunAttributeType.XorMappedAddress, Value = [0, 1, 2, 3] }.GetXorMappedAddress(new byte[12]));
+        Assert.Null(new StunAttribute { Type = StunAttributeType.Username, Value = [0, 0, 4, 4] }.GetErrorCode());
+        Assert.Null(new StunAttribute { Type = StunAttributeType.ErrorCode, Value = [0, 0, 4] }.GetErrorCode());
+        Assert.Null(new StunAttribute { Value = [1, 2, 3] }.GetUInt32());
+    }
 }

@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Threading.Channels;
+using Microsoft.Extensions.Logging;
 using Org.BouncyCastle.Tls;
 
 namespace RtcForge.Dtls;
@@ -10,11 +11,13 @@ internal sealed class BouncyCastleDatagramTransport : DatagramTransport
     private readonly Channel<byte[]> _sendChannel = Channel.CreateUnbounded<byte[]>();
     private readonly Func<byte[], Task> _sendFunc;
     private readonly Task _sendLoop;
+    private readonly ILogger? _logger;
     private int _closed;
 
-    public BouncyCastleDatagramTransport(Func<byte[], Task> sendFunc)
+    public BouncyCastleDatagramTransport(Func<byte[], Task> sendFunc, ILogger? logger = null)
     {
         _sendFunc = sendFunc;
+        _logger = logger;
         _sendLoop = Task.Run(ProcessSendsAsync);
     }
 
@@ -39,6 +42,8 @@ internal sealed class BouncyCastleDatagramTransport : DatagramTransport
             {
                 int bytesToCopy = Math.Min(buffer.Length, data.Length);
                 data.AsSpan(0, bytesToCopy).CopyTo(buffer);
+                byte first = bytesToCopy > 0 ? buffer[0] : (byte)0;
+                _logger?.LogDebug("BC-DTLS Receive (immediate) bytesToCopy={Bytes} queueBacklog={Backlog} first=0x{First:X2}", bytesToCopy, _receiveQueue.Count, first);
                 return bytesToCopy;
             }
 
@@ -48,13 +53,20 @@ internal sealed class BouncyCastleDatagramTransport : DatagramTransport
                 {
                     int bytesToCopy = Math.Min(buffer.Length, data.Length);
                     data.AsSpan(0, bytesToCopy).CopyTo(buffer);
+                    byte first = bytesToCopy > 0 ? buffer[0] : (byte)0;
+                    _logger?.LogDebug("BC-DTLS Receive (waited) bytesToCopy={Bytes} waitMs={Wait} first=0x{First:X2}", bytesToCopy, waitMillis, first);
                     return bytesToCopy;
                 }
+                _logger?.LogDebug("BC-DTLS Receive timeout waitMs={Wait} queueBacklog={Backlog}", waitMillis, _receiveQueue.Count);
             }
             return 0;
         }
         catch (OperationCanceledException) { return 0; }
-        catch (Exception) { return -1; }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "BC-DTLS Receive error");
+            return -1;
+        }
     }
 
     public void Send(byte[] buf, int off, int len)
@@ -64,8 +76,11 @@ internal sealed class BouncyCastleDatagramTransport : DatagramTransport
 
     public void Send(ReadOnlySpan<byte> buffer)
     {
+        byte first = buffer.Length > 0 ? buffer[0] : (byte)0;
+        _logger?.LogDebug("BC-DTLS Send (enqueue) bytes={Bytes} first=0x{First:X2}", buffer.Length, first);
         if (!_sendChannel.Writer.TryWrite(buffer.ToArray()))
         {
+            _logger?.LogWarning("BC-DTLS Send dropped — channel closed bytes={Bytes}", buffer.Length);
             throw new InvalidOperationException("DTLS transport is closed");
         }
     }
@@ -83,9 +98,25 @@ internal sealed class BouncyCastleDatagramTransport : DatagramTransport
 
     private async Task ProcessSendsAsync()
     {
-        await foreach (var data in _sendChannel.Reader.ReadAllAsync().ConfigureAwait(false))
+        try
         {
-            await _sendFunc(data).ConfigureAwait(false);
+            await foreach (var data in _sendChannel.Reader.ReadAllAsync().ConfigureAwait(false))
+            {
+                byte first = data.Length > 0 ? data[0] : (byte)0;
+                _logger?.LogDebug("BC-DTLS tx (to wire) bytes={Bytes} first=0x{First:X2}", data.Length, first);
+                try
+                {
+                    await _sendFunc(data).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning(ex, "BC-DTLS tx send failed bytes={Bytes}", data.Length);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "BC-DTLS send loop crashed");
         }
     }
 }

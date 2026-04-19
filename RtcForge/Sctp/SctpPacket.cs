@@ -8,6 +8,7 @@ namespace RtcForge.Sctp;
 public class SctpPacket
 {
     public const int HeaderLength = 12;
+    private static readonly uint[] Crc32CTable = CreateCrc32CTable();
 
     public ushort SourcePort { get; set; }
     public ushort DestinationPort { get; set; }
@@ -23,12 +24,17 @@ public class SctpPacket
             return false;
         }
 
+        if (!VerifyChecksum(buffer))
+        {
+            return false;
+        }
+
         packet = new SctpPacket
         {
             SourcePort = BinaryPrimitives.ReadUInt16BigEndian(buffer[..2]),
             DestinationPort = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(2, 2)),
             VerificationTag = BinaryPrimitives.ReadUInt32BigEndian(buffer.Slice(4, 4)),
-            Checksum = BinaryPrimitives.ReadUInt32BigEndian(buffer.Slice(8, 4))
+            Checksum = BinaryPrimitives.ReadUInt32LittleEndian(buffer.Slice(8, 4))
         };
 
         int offset = HeaderLength;
@@ -51,7 +57,20 @@ public class SctpPacket
             }
         }
 
-        return true;
+        return packet.Chunks.Count > 0;
+    }
+
+    public static bool VerifyChecksum(ReadOnlySpan<byte> data)
+    {
+        if (data.Length < HeaderLength)
+        {
+            return false;
+        }
+
+        uint expected = BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(8, 4));
+        byte[] copy = data.ToArray();
+        BinaryPrimitives.WriteUInt32LittleEndian(copy.AsSpan(8, 4), 0);
+        return ComputeChecksum(copy) == expected;
     }
 
     public int GetSerializedLength()
@@ -75,7 +94,7 @@ public class SctpPacket
         BinaryPrimitives.WriteUInt16BigEndian(buffer[..2], SourcePort);
         BinaryPrimitives.WriteUInt16BigEndian(buffer.Slice(2, 2), DestinationPort);
         BinaryPrimitives.WriteUInt32BigEndian(buffer.Slice(4, 4), VerificationTag);
-        BinaryPrimitives.WriteUInt32BigEndian(buffer.Slice(8, 4), 0); // Checksum placeholder
+        BinaryPrimitives.WriteUInt32LittleEndian(buffer.Slice(8, 4), 0); // Checksum placeholder
 
         int offset = HeaderLength;
         foreach (var chunk in Chunks)
@@ -94,7 +113,39 @@ public class SctpPacket
             offset += (chunkLen + 3) & ~3;
         }
 
+        uint checksum = ComputeChecksum(buffer[..offset]);
+        BinaryPrimitives.WriteUInt32LittleEndian(buffer.Slice(8, 4), checksum);
+
         return offset;
+    }
+
+    public static uint ComputeChecksum(ReadOnlySpan<byte> data)
+    {
+        uint crc = 0xFFFFFFFF;
+        foreach (byte b in data)
+        {
+            crc = Crc32CTable[(crc ^ b) & 0xFF] ^ (crc >> 8);
+        }
+
+        return ~crc;
+    }
+
+    private static uint[] CreateCrc32CTable()
+    {
+        var table = new uint[256];
+        const uint polynomial = 0x82F63B78;
+        for (uint i = 0; i < table.Length; i++)
+        {
+            uint crc = i;
+            for (int bit = 0; bit < 8; bit++)
+            {
+                crc = (crc & 1) != 0 ? polynomial ^ (crc >> 1) : crc >> 1;
+            }
+
+            table[i] = crc;
+        }
+
+        return table;
     }
 }
 
@@ -138,7 +189,12 @@ public abstract class SctpChunk
         byte flags = buffer[1];
         ushort length = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(2, 2));
 
-        if (buffer.Length < length)
+        if (length < 4 || buffer.Length < length)
+        {
+            return false;
+        }
+
+        if (length < GetMinimumLength((SctpChunkType)type))
         {
             return false;
         }
@@ -149,10 +205,23 @@ public abstract class SctpChunk
             SctpChunkType.Init or SctpChunkType.InitAck => SctpInitChunk.Parse(buffer[..length], (SctpChunkType)type, flags),
             SctpChunkType.Sack => SctpSackChunk.Parse(buffer[..length], flags),
             SctpChunkType.Shutdown => SctpShutdownChunk.Parse(buffer[..length], flags),
+            SctpChunkType.CookieEcho => SctpCookieEchoChunk.Parse(buffer[..length], flags),
             SctpChunkType.ShutdownAck or SctpChunkType.ShutdownComplete or SctpChunkType.CookieAck => new SctpSimpleChunk { Type = (SctpChunkType)type, Flags = flags, Length = length },
             _ => new SctpUnknownChunk { Type = (SctpChunkType)type, Flags = flags, Length = length, Data = buffer[4..length].ToArray() },
         };
         return chunk != null;
+    }
+
+    private static int GetMinimumLength(SctpChunkType type)
+    {
+        return type switch
+        {
+            SctpChunkType.Data => 16,
+            SctpChunkType.Init or SctpChunkType.InitAck => 20,
+            SctpChunkType.Sack => 16,
+            SctpChunkType.Shutdown => 8,
+            _ => 4
+        };
     }
 
     protected void WriteHeader(Span<byte> buffer)
@@ -184,6 +253,41 @@ public class SctpSimpleChunk : SctpChunk
         Length = 4;
         WriteHeader(buffer);
         return 4;
+    }
+}
+
+public class SctpCookieEchoChunk : SctpChunk
+{
+    public byte[] Cookie { get; set; } = [];
+
+    public SctpCookieEchoChunk()
+    {
+        Type = SctpChunkType.CookieEcho;
+    }
+
+    public override int GetSerializedLength() => 4 + Cookie.Length;
+
+    public static SctpCookieEchoChunk Parse(ReadOnlySpan<byte> buffer, byte flags)
+    {
+        return new SctpCookieEchoChunk
+        {
+            Flags = flags,
+            Length = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(2, 2)),
+            Cookie = buffer[4..].ToArray()
+        };
+    }
+
+    public override int Serialize(Span<byte> buffer)
+    {
+        Length = (ushort)GetSerializedLength();
+        if (buffer.Length < Length)
+        {
+            return -1;
+        }
+
+        WriteHeader(buffer);
+        Cookie.CopyTo(buffer[4..]);
+        return Length;
     }
 }
 
@@ -234,19 +338,31 @@ public class SctpDataChunk : SctpChunk
 
 public class SctpInitChunk : SctpChunk
 {
+    private const ushort StateCookieParameterType = 7;
+
     public uint InitiateTag { get; set; }
     public uint AdvertisedReceiverWindowCredit { get; set; }
     public ushort NumberOfOutboundStreams { get; set; }
     public ushort NumberOfInboundStreams { get; set; }
     public uint InitialTsn { get; set; }
+    public byte[]? StateCookie { get; set; }
 
     public SctpInitChunk(SctpChunkType type) { Type = type; }
 
-    public override int GetSerializedLength() => 20;
+    public override int GetSerializedLength()
+    {
+        int length = 20;
+        if (StateCookie is { Length: > 0 })
+        {
+            length += (4 + StateCookie.Length + 3) & ~3;
+        }
+
+        return length;
+    }
 
     public static SctpInitChunk Parse(ReadOnlySpan<byte> buffer, SctpChunkType type, byte flags)
     {
-        return new SctpInitChunk(type)
+        var chunk = new SctpInitChunk(type)
         {
             Flags = flags,
             Length = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(2, 2)),
@@ -256,6 +372,26 @@ public class SctpInitChunk : SctpChunk
             NumberOfInboundStreams = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(14, 2)),
             InitialTsn = BinaryPrimitives.ReadUInt32BigEndian(buffer.Slice(16, 4))
         };
+
+        int offset = 20;
+        while (offset + 4 <= chunk.Length)
+        {
+            ushort parameterType = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset, 2));
+            ushort parameterLength = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(offset + 2, 2));
+            if (parameterLength < 4 || offset + parameterLength > chunk.Length)
+            {
+                break;
+            }
+
+            if (parameterType == StateCookieParameterType)
+            {
+                chunk.StateCookie = buffer.Slice(offset + 4, parameterLength - 4).ToArray();
+            }
+
+            offset += (parameterLength + 3) & ~3;
+        }
+
+        return chunk;
     }
 
     public override int Serialize(Span<byte> buffer)
@@ -272,6 +408,17 @@ public class SctpInitChunk : SctpChunk
         BinaryPrimitives.WriteUInt16BigEndian(buffer.Slice(12, 2), NumberOfOutboundStreams);
         BinaryPrimitives.WriteUInt16BigEndian(buffer.Slice(14, 2), NumberOfInboundStreams);
         BinaryPrimitives.WriteUInt32BigEndian(buffer.Slice(16, 4), InitialTsn);
+        if (StateCookie is { Length: > 0 })
+        {
+            int parameterOffset = 20;
+            int parameterLength = 4 + StateCookie.Length;
+            BinaryPrimitives.WriteUInt16BigEndian(buffer.Slice(parameterOffset, 2), StateCookieParameterType);
+            BinaryPrimitives.WriteUInt16BigEndian(buffer.Slice(parameterOffset + 2, 2), (ushort)parameterLength);
+            StateCookie.CopyTo(buffer.Slice(parameterOffset + 4));
+            int paddedLength = (parameterLength + 3) & ~3;
+            buffer.Slice(parameterOffset + parameterLength, paddedLength - parameterLength).Clear();
+        }
+
         return Length;
     }
 }

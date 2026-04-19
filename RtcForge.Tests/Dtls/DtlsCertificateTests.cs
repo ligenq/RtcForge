@@ -40,4 +40,17 @@ public class DtlsCertificateTests
 
         Assert.Throws<TlsFatalAlert>(() => RtcForge.Dtls.DtlsTransport.ValidateFingerprint(der, "sha-256", new string('0', cert.Fingerprint.Length)));
     }
+
+    [Theory]
+    [InlineData(null, "AA")]
+    [InlineData("sha-256", null)]
+    [InlineData("", "AA")]
+    [InlineData("sha-256", "")]
+    public void ValidateFingerprint_RejectsMissingFingerprintParameters(string? algorithm, string? fingerprint)
+    {
+        var cert = DtlsCertificate.Generate();
+        byte[] der = cert.TlsCertificate.GetCertificateAt(0).GetEncoded();
+
+        Assert.Throws<TlsFatalAlert>(() => RtcForge.Dtls.DtlsTransport.ValidateFingerprint(der, algorithm, fingerprint));
+    }
 }

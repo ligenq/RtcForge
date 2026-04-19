@@ -270,7 +270,7 @@ public interface IWebRtcConnection : IAsyncDisposable
 /// </summary>
 public sealed class WebRtcConnection : IWebRtcConnection
 {
-    private readonly RTCPeerConnection _peerConnection;
+    private readonly IWebRtcPeerConnection _peerConnection;
     private readonly Channel<WebRtcIceCandidateDescription> _iceCandidates = Channel.CreateUnbounded<WebRtcIceCandidateDescription>();
     private readonly Channel<IWebRtcDataChannel> _dataChannels = Channel.CreateUnbounded<IWebRtcDataChannel>();
     private readonly Channel<PeerConnectionState> _connectionStates = Channel.CreateUnbounded<PeerConnectionState>();
@@ -293,8 +293,13 @@ public sealed class WebRtcConnection : IWebRtcConnection
     /// </summary>
     /// <param name="configuration">Optional low-level peer connection configuration.</param>
     public WebRtcConnection(RTCConfiguration? configuration = null)
+        : this(new RtcPeerConnectionAdapter(new RTCPeerConnection(configuration)))
     {
-        _peerConnection = new RTCPeerConnection(configuration);
+    }
+
+    internal WebRtcConnection(IWebRtcPeerConnection peerConnection)
+    {
+        _peerConnection = peerConnection;
         _peerConnection.OnIceCandidate += HandleIceCandidate;
         _peerConnection.OnDataChannel += HandleDataChannel;
         _peerConnection.OnConnectionStateChange += HandleConnectionStateChange;
@@ -318,7 +323,7 @@ public sealed class WebRtcConnection : IWebRtcConnection
     /// <inheritdoc />
     public IWebRtcDataChannel CreateDataChannel(string label)
     {
-        return new WebRtcDataChannel(_peerConnection.CreateDataChannel(label));
+        return _peerConnection.CreateDataChannel(label);
     }
 
     /// <inheritdoc />
@@ -449,9 +454,9 @@ public sealed class WebRtcConnection : IWebRtcConnection
         _iceCandidates.Writer.TryWrite(new WebRtcIceCandidateDescription(candidate.ToString()));
     }
 
-    private void HandleDataChannel(object? sender, RTCDataChannel channel)
+    private void HandleDataChannel(object? sender, IWebRtcDataChannel channel)
     {
-        _dataChannels.Writer.TryWrite(new WebRtcDataChannel(channel));
+        _dataChannels.Writer.TryWrite(channel);
     }
 
     private void HandleConnectionStateChange(object? sender, PeerConnectionState state)
@@ -463,6 +468,60 @@ public sealed class WebRtcConnection : IWebRtcConnection
     {
         _signalingStates.Writer.TryWrite(_peerConnection.SignalingState);
     }
+}
+
+internal interface IWebRtcPeerConnection : IAsyncDisposable
+{
+    PeerConnectionState ConnectionState { get; }
+    SignalingState SignalingState { get; }
+    event EventHandler<Ice.IceCandidate>? OnIceCandidate;
+    event EventHandler<IWebRtcDataChannel>? OnDataChannel;
+    event EventHandler<PeerConnectionState>? OnConnectionStateChange;
+    IWebRtcDataChannel CreateDataChannel(string label);
+    Task<Sdp.SdpMessage> CreateOfferAsync();
+    Task<Sdp.SdpMessage> CreateAnswerAsync();
+    Task SetLocalDescriptionAsync(Sdp.SdpMessage description);
+    Task SetRemoteDescriptionAsync(Sdp.SdpMessage description);
+    void AddIceCandidate(Ice.IceCandidate candidate);
+    Task<bool> ConnectAsync(CancellationToken cancellationToken);
+    Task<bool> ConnectAsync(TimeSpan timeout, CancellationToken cancellationToken);
+}
+
+internal sealed class RtcPeerConnectionAdapter : IWebRtcPeerConnection
+{
+    private readonly RTCPeerConnection _inner;
+
+    public RtcPeerConnectionAdapter(RTCPeerConnection inner)
+    {
+        _inner = inner;
+        _inner.OnIceCandidate += (sender, candidate) => OnIceCandidate?.Invoke(sender, candidate);
+        _inner.OnDataChannel += (sender, channel) => OnDataChannel?.Invoke(sender, new WebRtcDataChannel(channel));
+        _inner.OnConnectionStateChange += (sender, state) => OnConnectionStateChange?.Invoke(sender, state);
+    }
+
+    public PeerConnectionState ConnectionState => _inner.ConnectionState;
+    public SignalingState SignalingState => _inner.SignalingState;
+    public event EventHandler<Ice.IceCandidate>? OnIceCandidate;
+    public event EventHandler<IWebRtcDataChannel>? OnDataChannel;
+    public event EventHandler<PeerConnectionState>? OnConnectionStateChange;
+
+    public IWebRtcDataChannel CreateDataChannel(string label) => new WebRtcDataChannel(_inner.CreateDataChannel(label));
+
+    public Task<Sdp.SdpMessage> CreateOfferAsync() => _inner.CreateOfferAsync();
+
+    public Task<Sdp.SdpMessage> CreateAnswerAsync() => _inner.CreateAnswerAsync();
+
+    public Task SetLocalDescriptionAsync(Sdp.SdpMessage description) => _inner.SetLocalDescriptionAsync(description);
+
+    public Task SetRemoteDescriptionAsync(Sdp.SdpMessage description) => _inner.SetRemoteDescriptionAsync(description);
+
+    public void AddIceCandidate(Ice.IceCandidate candidate) => _inner.AddIceCandidate(candidate);
+
+    public Task<bool> ConnectAsync(CancellationToken cancellationToken) => _inner.ConnectAsync(cancellationToken);
+
+    public Task<bool> ConnectAsync(TimeSpan timeout, CancellationToken cancellationToken) => _inner.ConnectAsync(timeout, cancellationToken);
+
+    public ValueTask DisposeAsync() => _inner.DisposeAsync();
 }
 
 /// <summary>

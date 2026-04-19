@@ -129,6 +129,19 @@ public class RtpPacketEdgeCaseTests
     }
 
     [Fact]
+    public void TryParse_ExtensionLengthExceedsBuffer_ReturnsFalse()
+    {
+        byte[] buffer = new byte[16];
+        buffer[0] = 0x90; // V=2, X=1
+        buffer[1] = 0x60;
+        BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(14, 2), 1); // needs 8 extension bytes, only 4 available
+
+        bool result = RtpPacket.TryParse(buffer, out _);
+
+        Assert.False(result);
+    }
+
+    [Fact]
     public void Serialize_BufferTooSmall_ReturnsNegative()
     {
         var packet = new RtpPacket
@@ -181,5 +194,33 @@ public class RtpPacketEdgeCaseTests
         // Verify extension is present
         Assert.Equal(0xBE, buffer[12]);
         Assert.Equal(0xDE, buffer[13]);
+    }
+
+    [Fact]
+    public void Serialize_WithCsrcAndPadding_IncludesCsrcAndPaddingByte()
+    {
+        var packet = new RtpPacket
+        {
+            CsrcCount = 1,
+            Csrc = [0x01020304],
+            Padding = true,
+            PayloadType = 96,
+            SequenceNumber = 1,
+            Timestamp = 100,
+            Ssrc = 200,
+            Payload = new byte[] { 0xAA }.AsMemory()
+        };
+        byte[] buffer = new byte[packet.GetSerializedLength()];
+
+        int len = packet.Serialize(buffer);
+
+        Assert.Equal(18, len);
+        Assert.Equal(0x81 | 0x20, buffer[0]);
+        Assert.Equal(0x01, buffer[12]);
+        Assert.Equal(0x02, buffer[13]);
+        Assert.Equal(0x03, buffer[14]);
+        Assert.Equal(0x04, buffer[15]);
+        Assert.Equal(0xAA, buffer[16]);
+        Assert.Equal(1, buffer[17]);
     }
 }

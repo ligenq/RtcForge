@@ -72,4 +72,40 @@ public class IceCandidatePairTests
         // by descending priority. Verifying indirectly via the pair objects.
         Assert.True(highPair.Priority > lowPair.Priority);
     }
+
+    [Fact]
+    public async Task Start_PerformsChecksAndStopsAfterAllPairs()
+    {
+        using var agent = new IceAgent();
+        var scheduler = new IceCheckScheduler(agent);
+        var first = new IceCandidatePair(
+            new IceCandidate { Priority = 10 },
+            new IceCandidate { Priority = 10 });
+        var second = new IceCandidatePair(
+            new IceCandidate { Priority = 20 },
+            new IceCandidate { Priority = 20 });
+        scheduler.AddPair(first);
+        scheduler.AddPair(second);
+
+        scheduler.Start();
+
+        for (int i = 0; i < 20 && (first.State != IceState.Checking || second.State != IceState.Checking); i++)
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(20), TimeProvider.System);
+        }
+
+        Assert.Equal(IceState.Checking, first.State);
+        Assert.Equal(IceState.Checking, second.State);
+    }
+
+    [Fact]
+    public async Task Start_WithNoPairs_DoesNotThrow()
+    {
+        using var agent = new IceAgent();
+        var scheduler = new IceCheckScheduler(agent);
+
+        scheduler.Start();
+
+        await Task.Delay(TimeSpan.FromMilliseconds(50), TimeProvider.System);
+    }
 }

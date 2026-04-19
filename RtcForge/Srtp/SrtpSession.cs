@@ -48,4 +48,14 @@ public class SrtpSession
     {
         return _remoteContext.Unprotect(input, out packet);
     }
+
+    public bool ProtectRtcp(ReadOnlySpan<byte> rtcp, Span<byte> output, out int length)
+    {
+        return _localContext.ProtectRtcp(rtcp, output, out length);
+    }
+
+    public bool UnprotectRtcp(ReadOnlyMemory<byte> input, out ReadOnlyMemory<byte> rtcp)
+    {
+        return _remoteContext.UnprotectRtcp(input, out rtcp);
+    }
 }

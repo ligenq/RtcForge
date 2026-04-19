@@ -51,12 +51,24 @@ public class IceUdpTransport : IDisposable
                 try
                 {
                     var result = await _udpClient.Client.ReceiveFromAsync(buffer, SocketFlags.None, remoteEP, _cts.Token);
+                    if (_logger != null && _logger.IsEnabled(LogLevel.Debug))
+                    {
+                        byte first = result.ReceivedBytes > 0 ? buffer[0] : (byte)0;
+                        _logger.LogDebug(
+                            "IceUdpTransport {Local} rx bytes={Bytes} from={Remote} first=0x{First:X2} class={Class}",
+                            LocalEndPoint, result.ReceivedBytes, result.RemoteEndPoint, first, ClassifyFirstByte(first));
+                    }
                     await _receiveChannel.Writer.WriteAsync(new UdpPacket
                     {
                         Array = buffer,
                         Length = result.ReceivedBytes,
                         RemoteEndPoint = (IPEndPoint)result.RemoteEndPoint
                     }, _cts.Token);
+                }
+                catch (SocketException ex) when (IsIgnorableUdpReceiveError(ex) && !_cts.IsCancellationRequested)
+                {
+                    ArrayPool<byte>.Shared.Return(buffer);
+                    continue;
                 }
                 catch
                 {
@@ -87,6 +99,19 @@ public class IceUdpTransport : IDisposable
     }
 
     public ChannelReader<UdpPacket> GetReader() => _receiveChannel.Reader;
+
+    private static bool IsIgnorableUdpReceiveError(SocketException exception)
+    {
+        return exception.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionRefused;
+    }
+
+    private static string ClassifyFirstByte(byte b) => b switch
+    {
+        <= 3 => "STUN",
+        >= 20 and <= 63 => "DTLS",
+        >= 128 and <= 191 => "RTP/RTCP",
+        _ => "UNKNOWN"
+    };
 
     public void Dispose()
     {

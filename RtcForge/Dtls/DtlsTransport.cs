@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using Microsoft.Extensions.Logging;
 using Org.BouncyCastle.Security;
@@ -26,6 +27,7 @@ public sealed class DtlsTransport : IDtlsTransport
     private readonly Func<byte[], Task> _sendFunc;
     private Org.BouncyCastle.Tls.DtlsTransport? _dtlsTransport;
     private BouncyCastleDatagramTransport? _bcTransport;
+    private readonly ConcurrentQueue<byte[]> _earlyPackets = new();
     private SrtpKeys? _srtpKeys;
     private readonly DtlsCertificate _certificate;
     private readonly Lock _sendLock = new();
@@ -64,21 +66,41 @@ public sealed class DtlsTransport : IDtlsTransport
     {
         _remoteFingerprintAlg = algorithm;
         _remoteFingerprint = fingerprint;
+        _logger?.LogDebug("DTLS remote fingerprint configured algorithm={Algorithm}", algorithm);
     }
 
     public void HandleIncomingPacket(byte[] data)
     {
-        _bcTransport?.PushReceivedData(data);
+        var transport = _bcTransport;
+        if (transport != null)
+        {
+            _logger?.LogTrace("DTLS rx packet bytes={Bytes}", data.Length);
+            transport.PushReceivedData(data);
+        }
+        else
+        {
+            _logger?.LogDebug("DTLS queued early packet bytes={Bytes}", data.Length);
+            _earlyPackets.Enqueue(data);
+        }
     }
 
     public Task StartAsync(bool isClient)
     {
+        _logger?.LogInformation("DTLS start role={Role}", isClient ? "client" : "server");
+        State = DtlsState.Connecting;
+        _bcTransport = new BouncyCastleDatagramTransport(_sendFunc, _loggerFactory?.CreateLogger("RtcForge.Dtls.BouncyCastleDatagramTransport"));
+
+        // Flush any DTLS packets (e.g. ClientHello) that arrived before the transport was ready.
+        while (_earlyPackets.TryDequeue(out var early))
+        {
+            _logger?.LogDebug("DTLS flushing early packet bytes={Bytes}", early.Length);
+            _bcTransport.PushReceivedData(early);
+        }
+
         return Task.Run(() =>
         {
             try
             {
-                State = DtlsState.Connecting;
-                _bcTransport = new BouncyCastleDatagramTransport(_sendFunc);
                 var crypto = new BcTlsCrypto(new SecureRandom());
 
                 if (isClient)
@@ -96,6 +118,7 @@ public sealed class DtlsTransport : IDtlsTransport
                     _srtpKeys = server.ExportSrtpKeys();
                 }
 
+                _logger?.LogInformation("DTLS handshake completed role={Role} hasSrtpKeys={HasSrtpKeys}", isClient ? "client" : "server", _srtpKeys != null);
                 State = DtlsState.Connected;
                 Task.Run(ReceiveLoop).FireAndForget();
             }
@@ -119,6 +142,7 @@ public sealed class DtlsTransport : IDtlsTransport
                 {
                     byte[] data = new byte[read];
                     Array.Copy(buf, 0, data, 0, read);
+                    _logger?.LogTrace("DTLS application data rx bytes={Bytes}", read);
                     OnData?.Invoke(this, data);
                 }
             }
@@ -139,6 +163,7 @@ public sealed class DtlsTransport : IDtlsTransport
 
         lock (_sendLock)
         {
+            _logger?.LogTrace("DTLS application data tx bytes={Bytes}", data.Length);
             _dtlsTransport.Send(data, 0, data.Length);
         }
 
@@ -149,12 +174,12 @@ public sealed class DtlsTransport : IDtlsTransport
 
     internal static void ValidateFingerprint(byte[] der, string? algorithm, string? fingerprint)
     {
-        if (string.IsNullOrWhiteSpace(fingerprint))
+        if (string.IsNullOrWhiteSpace(algorithm) || string.IsNullOrWhiteSpace(fingerprint))
         {
-            return;
+            throw new TlsFatalAlert(AlertDescription.bad_certificate);
         }
 
-        byte[] hash = algorithm?.ToLowerInvariant() switch
+        byte[] hash = algorithm.ToLowerInvariant() switch
         {
             "sha-256" => SHA256.HashData(der),
             _ => throw new TlsFatalAlert(AlertDescription.bad_certificate)
@@ -259,11 +284,6 @@ internal class WebRtcTlsClient : DefaultTlsClient
 
         public void NotifyServerCertificate(TlsServerCertificate serverCertificate)
         {
-            if (string.IsNullOrEmpty(_client._expectedFingerprint))
-            {
-                return;
-            }
-
             var cert = serverCertificate.Certificate.GetCertificateAt(0);
             DtlsTransport.ValidateFingerprint(cert.GetEncoded(), _client._expectedFingerprintAlg, _client._expectedFingerprint);
         }

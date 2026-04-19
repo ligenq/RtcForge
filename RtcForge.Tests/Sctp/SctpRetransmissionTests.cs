@@ -56,7 +56,10 @@ public class SctpRetransmissionTests
 
         // Act: Receive SACK for this TSN
         var sack = new SctpSackChunk { CumulativeTsnAck = tsn };
-        var packet = new SctpPacket { VerificationTag = 0 }; // Tag logic is simplified in HandleSackChunk currently
+        uint myVerificationTag = (uint)typeof(SctpAssociation)
+            .GetField("_myVerificationTag", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .GetValue(assoc)!;
+        var packet = new SctpPacket { VerificationTag = myVerificationTag };
         packet.Chunks.Add(sack);
 
         byte[] sackBuffer = new byte[packet.GetSerializedLength()];
