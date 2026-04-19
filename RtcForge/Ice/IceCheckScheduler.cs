@@ -26,13 +26,11 @@ public class IceCandidatePair
 public class IceCheckScheduler
 {
     private readonly List<IceCandidatePair> _pairs = [];
-    private readonly IIceAgent _agent;
     private readonly ITimer _timer;
     private int _currentIndex;
 
-    public IceCheckScheduler(IIceAgent agent, TimeProvider? timeProvider = null)
+    public IceCheckScheduler(IIceAgent _, TimeProvider? timeProvider = null)
     {
-        _agent = agent;
         _timer = (timeProvider ?? TimeProvider.System).CreateTimer(OnTimer, null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
     }
 
@@ -59,11 +57,9 @@ public class IceCheckScheduler
         PerformCheckAsync(pair).FireAndForget();
     }
 
-    private async Task PerformCheckAsync(IceCandidatePair pair)
+    private static Task PerformCheckAsync(IceCandidatePair pair)
     {
         pair.State = IceState.Checking;
-        // The agent will handle the actual STUN transaction
-        // bool success = await _agent.SendConnectivityCheckAsync(pair);
-        // pair.State = success ? IceState.Connected : IceState.Failed;
+        return Task.CompletedTask;
     }
 }

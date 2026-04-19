@@ -7,12 +7,9 @@ public class SrtpSession
 {
     private readonly SrtpCryptoContext _localContext;
     private readonly SrtpCryptoContext _remoteContext;
-    private readonly ushort _profile;
 
     public SrtpSession(SrtpKeys keys, bool isClient)
     {
-        _profile = keys.ProtectionProfile;
-
         // RFC 5764: client_write_SRTP_master_key | server_write_SRTP_master_key | client_write_SRTP_master_salt | server_write_SRTP_master_salt
         const int keyLen = 16;
         const int saltLen = 14;

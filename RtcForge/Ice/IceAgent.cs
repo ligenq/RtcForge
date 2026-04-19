@@ -283,8 +283,9 @@ public class IceAgent : IIceAgent
                 {
                     try
                     {
-                        var uri = new Uri(url.Replace("turn:", "stun://"));
-                        var turnEp = new IPEndPoint(Dns.GetHostAddresses(uri.Host)[0], uri.Port > 0 ? uri.Port : 3478);
+                        var uri = new Uri(url.Replace("turn:", "stun://", StringComparison.Ordinal));
+                        var hostAddresses = await Dns.GetHostAddressesAsync(uri.Host).ConfigureAwait(false);
+                        var turnEp = new IPEndPoint(hostAddresses[0], uri.Port > 0 ? uri.Port : 3478);
 
                         var request = new StunMessage { Type = StunMessageType.AllocateRequest, TransactionId = Guid.NewGuid().ToByteArray().AsSpan(0, 12).ToArray() };
                         request.Attributes.Add(new StunAttribute { Type = StunAttributeType.RequestedTransport, Value = [17, 0, 0, 0] });
@@ -468,7 +469,10 @@ public class IceAgent : IIceAgent
                 }
             }
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException)
+        {
+            // Expected when the ICE agent is disposed.
+        }
         catch (Exception ex)
         {
             _logger?.LogError(ex, "ICE transport processing failed");
@@ -502,10 +506,13 @@ public class IceAgent : IIceAgent
         }
         else if (firstByte >= 20 && firstByte <= 63)
         {
-            _logger?.LogDebug(
-                "IceAgent DTLS-classified rx bytes={Bytes} from={Remote} local={Local} first=0x{First:X2} subscribers={Subs}",
-                packet.Length, packet.RemoteEndPoint, transport.LocalEndPoint, firstByte,
-                OnDtlsPacket?.GetInvocationList().Length ?? 0);
+            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+            {
+                _logger.LogDebug(
+                    "IceAgent DTLS-classified rx bytes={Bytes} from={Remote} local={Local} first=0x{First:X2} subscribers={Subs}",
+                    packet.Length, packet.RemoteEndPoint, transport.LocalEndPoint, firstByte,
+                    OnDtlsPacket?.GetInvocationList().Length ?? 0);
+            }
             OnDtlsPacket?.Invoke(this, packet);
         }
         else if (firstByte >= 128 && firstByte <= 191)
@@ -669,17 +676,15 @@ public class IceAgent : IIceAgent
                 || State == IceState.Complete
                 || State == IceState.Checking
                 || State == IceState.Connected
-                || State == IceState.Failed))
+                || State == IceState.Failed)
+            && Interlocked.CompareExchange(ref _connectKickPending, 1, 0) == 0)
         {
             // Coalesce burst candidate additions (e.g. SDP parsing adds several
             // a=candidate lines back-to-back) into a single ConnectAsync run.
             // Without this, each call serializes on _connectGate and each one
             // burns its own STUN retransmission budget, so lower-priority srflx
             // pairs never get checked before the outer connect timeout fires.
-            if (Interlocked.CompareExchange(ref _connectKickPending, 1, 0) == 0)
-            {
-                RunConnectKickAsync().FireAndForget();
-            }
+            RunConnectKickAsync().FireAndForget();
         }
     }
 
@@ -697,6 +702,7 @@ public class IceAgent : IIceAgent
         }
         catch (OperationCanceledException)
         {
+            // Expected when a deferred connect kick is superseded or the agent is disposed.
         }
     }
 
@@ -732,7 +738,10 @@ public class IceAgent : IIceAgent
             throw new InvalidOperationException("Remote credentials not set");
         }
 
-        _logger?.LogInformation("IceAgent.ConnectAsync entered (IsControlling={IsControlling})", IsControlling);
+        if (_logger?.IsEnabled(LogLevel.Information) == true)
+        {
+            _logger.LogInformation("IceAgent.ConnectAsync entered (IsControlling={IsControlling})", IsControlling);
+        }
 
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
         var connectToken = linkedCts.Token;
@@ -754,7 +763,10 @@ public class IceAgent : IIceAgent
                 localSnapshot = [.. _localCandidates];
                 remoteSnapshot = [.. _remoteCandidates];
             }
-            _logger?.LogInformation("IceAgent pair-check starting: {LocalCount} local x {RemoteCount} remote candidates", localSnapshot.Count, remoteSnapshot.Count);
+            if (_logger?.IsEnabled(LogLevel.Information) == true)
+            {
+                _logger.LogInformation("IceAgent pair-check starting: {LocalCount} local x {RemoteCount} remote candidates", localSnapshot.Count, remoteSnapshot.Count);
+            }
             foreach (var local in localSnapshot)
             {
                 foreach (var remote in remoteSnapshot)
@@ -807,7 +819,7 @@ public class IceAgent : IIceAgent
                     }
 
                     var pendingCompletion = Task.WhenAny(pending);
-                    var graceDelay = Task.Delay(nominationGrace - elapsedSinceFirstSuccess, _timeProvider);
+                    var graceDelay = Task.Delay(nominationGrace - elapsedSinceFirstSuccess, _timeProvider, cancellationToken);
                     var next = await Task.WhenAny(pendingCompletion, graceDelay).ConfigureAwait(false);
                     if (next == graceDelay)
                     {
@@ -834,6 +846,7 @@ public class IceAgent : IIceAgent
                 }
                 catch (OperationCanceledException)
                 {
+                    // Expected after a winner is selected or connect is canceled.
                 }
             }
 
@@ -842,7 +855,7 @@ public class IceAgent : IIceAgent
                 winner = successful.MaxBy(s => s.Pair.Priority);
             }
 
-            pairCts.Cancel();
+            await pairCts.CancelAsync().ConfigureAwait(false);
             foreach (var t in pending)
             {
                 _ = t.ContinueWith(
@@ -880,7 +893,10 @@ public class IceAgent : IIceAgent
             }
 
             bool success = State == IceState.Connected || State == IceState.Completed;
-            _logger?.LogInformation("IceAgent.ConnectAsync exiting (state={State}, success={Success})", State, success);
+            if (_logger?.IsEnabled(LogLevel.Information) == true)
+            {
+                _logger.LogInformation("IceAgent.ConnectAsync exiting (state={State}, success={Success})", State, success);
+            }
             return success;
         }
         finally
@@ -908,7 +924,10 @@ public class IceAgent : IIceAgent
                 return null;
             }
 
-            _logger?.LogInformation("IceAgent checking pair local={Local} remote={Remote}", $"{pair.Local.Address}:{pair.Local.Port}", remoteEp);
+            if (_logger?.IsEnabled(LogLevel.Information) == true)
+            {
+                _logger.LogInformation("IceAgent checking pair local={Local} remote={Remote}", $"{pair.Local.Address}:{pair.Local.Port}", remoteEp);
+            }
             var response = await SendStunBindingRequestAsync(transport, remoteEp, cancellationToken: cancellationToken).ConfigureAwait(false);
             if (IsRoleConflictResponse(response))
             {
@@ -921,7 +940,10 @@ public class IceAgent : IIceAgent
                 return (transport, pair, remoteEp);
             }
 
-            _logger?.LogInformation("IceAgent pair failed local={Local} remote={Remote} response={Response}", $"{pair.Local.Address}:{pair.Local.Port}", remoteEp, response?.Type.ToString() ?? "null");
+            if (_logger?.IsEnabled(LogLevel.Information) == true)
+            {
+                _logger.LogInformation("IceAgent pair failed local={Local} remote={Remote} response={Response}", $"{pair.Local.Address}:{pair.Local.Port}", remoteEp, response?.Type.ToString() ?? "null");
+            }
             pair.State = IceState.Failed;
             return null;
         }
@@ -936,7 +958,10 @@ public class IceAgent : IIceAgent
             // the OS routing table rejects with ENETUNREACH) must not abort the whole
             // connectivity check. Log, mark the pair as failed, and let the other
             // parallel checks proceed.
-            _logger?.LogInformation("IceAgent pair check threw local={Local} remote={Remote} error={Error}", $"{pair.Local.Address}:{pair.Local.Port}", pair.Remote, ex.Message);
+            if (_logger?.IsEnabled(LogLevel.Information) == true)
+            {
+                _logger.LogInformation(ex, "IceAgent pair check threw local={Local} remote={Remote}", $"{pair.Local.Address}:{pair.Local.Port}", pair.Remote);
+            }
             pair.State = IceState.Failed;
             return null;
         }
@@ -1411,6 +1436,7 @@ public class IceAgent : IIceAgent
         }
         catch (OperationCanceledException)
         {
+            // Expected when consent freshness is stopped.
         }
     }
 
@@ -1484,7 +1510,18 @@ public class IceAgent : IIceAgent
 
     public void Dispose()
     {
+        Dispose(disposing: true);
+        GC.SuppressFinalize(this);
+    }
+
+    protected virtual void Dispose(bool disposing)
+    {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
+        if (!disposing)
         {
             return;
         }
@@ -1502,6 +1539,5 @@ public class IceAgent : IIceAgent
 
         _connectGate.Dispose();
         _cts.Dispose();
-        GC.SuppressFinalize(this);
     }
 }

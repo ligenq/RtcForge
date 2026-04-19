@@ -48,21 +48,25 @@ public class IceCandidate
             Port = int.Parse(parts[5])
         };
 
-        for (int i = 6; i < parts.Length; i++)
+        for (int i = 6; i < parts.Length;)
         {
             if (parts[i] == "typ")
             {
                 candidate.Type = Enum.Parse<IceCandidateType>(parts[i + 1], true);
-                i++;
+                i += 2;
             }
             else if (parts[i] == "raddr")
             {
                 candidate.RelatedAddress = parts[i + 1];
-                i++;
+                i += 2;
             }
             else if (parts[i] == "rport")
             {
                 candidate.RelatedPort = int.Parse(parts[i + 1]);
+                i += 2;
+            }
+            else
+            {
                 i++;
             }
         }

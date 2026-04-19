@@ -40,6 +40,7 @@ public partial class SctpAssociation : IDisposable
     private readonly ConcurrentDictionary<ushort, ushort> _outboundSsns = new();
     private readonly CancellationTokenSource _cts = new();
     private readonly TimeProvider _timeProvider;
+    private int _disposed;
 
     private readonly ILoggerFactory? _loggerFactory;
     private readonly ILogger<SctpAssociation>? _logger;
@@ -63,7 +64,10 @@ public partial class SctpAssociation : IDisposable
 
     internal void RegisterDataChannel(RTCDataChannel channel)
     {
-        _logger?.LogDebug("SCTP registering data channel label={Label} id={Id}", channel.Label, channel.Id);
+        if (_logger?.IsEnabled(LogLevel.Debug) == true)
+        {
+            _logger.LogDebug("SCTP registering data channel label={Label} id={Id}", channel.Label, channel.Id);
+        }
         _dataChannels.AddOrUpdate(channel.Id, channel, (_, _) => channel);
         var stream = new SctpStream(channel.Id, (ppid, msg) => DispatchStreamMessage(channel.Id, ppid, msg), _loggerFactory?.CreateLogger("RtcForge.Sctp.SctpStream"));
         _streams.AddOrUpdate(channel.Id, stream, (_, _) => stream);
@@ -71,7 +75,10 @@ public partial class SctpAssociation : IDisposable
 
     private void DispatchStreamMessage(ushort streamId, uint ppid, byte[] msg)
     {
-        _logger?.LogDebug("SCTP stream reassembled streamId={Stream} ppid={Ppid} bytes={Bytes}", streamId, ppid, msg.Length);
+        if (_logger?.IsEnabled(LogLevel.Debug) == true)
+        {
+            _logger.LogDebug("SCTP stream reassembled streamId={Stream} ppid={Ppid} bytes={Bytes}", streamId, ppid, msg.Length);
+        }
         if (ppid == 50)
         {
             HandleDcepMessage(streamId, msg);
@@ -82,18 +89,27 @@ public partial class SctpAssociation : IDisposable
         }
         else
         {
-            _logger?.LogDebug("SCTP dropping message — no channel registered for streamId={Stream} ppid={Ppid}", streamId, ppid);
+            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+            {
+                _logger.LogDebug("SCTP dropping message - no channel registered for streamId={Stream} ppid={Ppid}", streamId, ppid);
+            }
         }
     }
 
     public async Task StartAsync(bool isClient)
     {
-        _logger?.LogInformation("SCTP start role={Role}", isClient ? "client" : "server");
+        if (_logger?.IsEnabled(LogLevel.Information) == true)
+        {
+            _logger.LogInformation("SCTP start role={Role}", isClient ? "client" : "server");
+        }
         if (isClient)
         {
             await SendInitAsync();
             _state = SctpAssociationState.CookieWait;
-            _logger?.LogDebug("SCTP state={State}", _state);
+            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+            {
+                _logger.LogDebug("SCTP state={State}", _state);
+            }
         }
 
         Task.Run(() => ProcessPacketsAsync(), _cts.Token).FireAndForget();
@@ -169,7 +185,7 @@ public partial class SctpAssociation : IDisposable
     {
         if (SctpPacket.TryParse(data, out var packet))
         {
-            if (_logger != null && _logger.IsEnabled(LogLevel.Debug))
+            if (_logger?.IsEnabled(LogLevel.Debug) == true)
             {
                 var types = string.Join(",", packet.Chunks.Select(c => c.Type.ToString()));
                 _logger.LogDebug("SCTP packet rx bytes={Bytes} chunks=[{Types}]", data.Length, types);
@@ -178,7 +194,10 @@ public partial class SctpAssociation : IDisposable
         }
         else
         {
-            _logger?.LogDebug("SCTP packet parse failed bytes={Bytes}", data.Length);
+            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+            {
+                _logger.LogDebug("SCTP packet parse failed bytes={Bytes}", data.Length);
+            }
         }
     }
 
@@ -194,7 +213,10 @@ public partial class SctpAssociation : IDisposable
                 }
             }
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException)
+        {
+            // Expected during association disposal.
+        }
         catch (Exception ex)
         {
             _logger?.LogError(ex, "SCTP association packet processing failed");
@@ -205,7 +227,10 @@ public partial class SctpAssociation : IDisposable
     {
         if (!IsVerificationTagValid(packet))
         {
-            _logger?.LogDebug("SCTP dropping packet with invalid verification tag tag={Tag}", packet.VerificationTag);
+            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+            {
+                _logger.LogDebug("SCTP dropping packet with invalid verification tag tag={Tag}", packet.VerificationTag);
+            }
             return;
         }
 
@@ -213,17 +238,20 @@ public partial class SctpAssociation : IDisposable
         {
             switch (chunk.Type)
             {
-                case SctpChunkType.Init: await HandleInit(packet, (SctpInitChunk)chunk); break;
-                case SctpChunkType.InitAck: await HandleInitAck(packet, (SctpInitChunk)chunk); break;
-                case SctpChunkType.CookieEcho: await HandleCookieEcho(packet, chunk); break;
+                case SctpChunkType.Init: await HandleInit((SctpInitChunk)chunk); break;
+                case SctpChunkType.InitAck: await HandleInitAck((SctpInitChunk)chunk); break;
+                case SctpChunkType.CookieEcho: await HandleCookieEcho(chunk); break;
                 case SctpChunkType.CookieAck:
                     _state = SctpAssociationState.Established;
-                    _logger?.LogInformation("SCTP state={State} after CookieAck", _state);
+                    if (_logger?.IsEnabled(LogLevel.Information) == true)
+                    {
+                        _logger.LogInformation("SCTP state={State} after CookieAck", _state);
+                    }
                     OnEstablished?.Invoke(this, EventArgs.Empty);
                     break;
                 case SctpChunkType.Data: await HandleDataChunk((SctpDataChunk)chunk); break;
                 case SctpChunkType.Sack: HandleSackChunk((SctpSackChunk)chunk); break;
-                case SctpChunkType.Shutdown: await HandleShutdown((SctpShutdownChunk)chunk); break;
+                case SctpChunkType.Shutdown: await HandleShutdown(); break;
                 case SctpChunkType.ShutdownAck: await HandleShutdownAck(); break;
                 case SctpChunkType.ShutdownComplete: _state = SctpAssociationState.Closed; break;
             }
@@ -246,8 +274,11 @@ public partial class SctpAssociation : IDisposable
             }
         }
 
-        _logger?.LogDebug("SCTP DATA chunk tsn={Tsn} streamId={Stream} ppid={Ppid} payloadBytes={Bytes} isNew={New}",
-            data.Tsn, data.StreamId, data.PayloadProtocolId, data.UserData?.Length ?? 0, isNew);
+        if (_logger?.IsEnabled(LogLevel.Debug) == true)
+        {
+            _logger.LogDebug("SCTP DATA chunk tsn={Tsn} streamId={Stream} ppid={Ppid} payloadBytes={Bytes} isNew={New}",
+                data.Tsn, data.StreamId, data.PayloadProtocolId, data.UserData?.Length ?? 0, isNew);
+        }
 
         if (isNew)
         {
@@ -262,7 +293,10 @@ public partial class SctpAssociation : IDisposable
     private void HandleDcepMessage(ushort streamId, byte[] msg)
     {
         var dcep = DcepMessage.Parse(msg);
-        _logger?.LogDebug("DCEP message type={Type} streamId={StreamId}", dcep.Type, streamId);
+        if (_logger?.IsEnabled(LogLevel.Debug) == true)
+        {
+            _logger.LogDebug("DCEP message type={Type} streamId={StreamId}", dcep.Type, streamId);
+        }
         if (dcep.Type == DcepMessageType.DataChannelOpen)
         {
             var channel = new RTCDataChannel(dcep.Label, streamId, this);
@@ -271,13 +305,14 @@ public partial class SctpAssociation : IDisposable
             SendDataAsync(streamId, 50, new DcepMessage { Type = DcepMessageType.DataChannelAck }.Serialize()).FireAndForget();
             OnRemoteDataChannel?.Invoke(this, channel);
         }
-        else if (dcep.Type == DcepMessageType.DataChannelAck)
+        else if (dcep.Type == DcepMessageType.DataChannelAck
+            && _dataChannels.TryGetValue(streamId, out var channel))
         {
-            if (_dataChannels.TryGetValue(streamId, out var channel))
+            if (_logger?.IsEnabled(LogLevel.Information) == true)
             {
-                _logger?.LogInformation("DCEP ack received for data channel label={Label} id={Id}", channel.Label, channel.Id);
-                channel.SetOpen();
+                _logger.LogInformation("DCEP ack received for data channel label={Label} id={Id}", channel.Label, channel.Id);
             }
+            channel.SetOpen();
         }
     }
 
@@ -314,10 +349,10 @@ public partial class SctpAssociation : IDisposable
                 }
             }
 
-            foreach (var block in sack.GapAckBlocks)
+            foreach (var (startOffset, endOffset) in sack.GapAckBlocks)
             {
-                uint start = sack.CumulativeTsnAck + block.Start;
-                uint end = sack.CumulativeTsnAck + block.End;
+                uint start = sack.CumulativeTsnAck + startOffset;
+                uint end = sack.CumulativeTsnAck + endOffset;
                 for (uint tsn = start; tsn <= end; tsn++)
                 {
                     if (_outboundQueue.TryGetValue(tsn, out var item) && !item.Acked)
@@ -347,7 +382,7 @@ public partial class SctpAssociation : IDisposable
         await _sendFunc(buffer);
     }
 
-    private async Task HandleInit(SctpPacket _, SctpInitChunk init)
+    private async Task HandleInit(SctpInitChunk init)
     {
         _logger?.LogDebug("SCTP received Init");
         _peerVerificationTag = init.InitiateTag;
@@ -376,7 +411,7 @@ public partial class SctpAssociation : IDisposable
         return packet.VerificationTag == _myVerificationTag;
     }
 
-    private async Task HandleInitAck(SctpPacket _, SctpInitChunk initAck)
+    private async Task HandleInitAck(SctpInitChunk initAck)
     {
         _logger?.LogDebug("SCTP received InitAck");
         _peerVerificationTag = initAck.InitiateTag;
@@ -390,12 +425,15 @@ public partial class SctpAssociation : IDisposable
 
         await SendChunkInternalAsync(new SctpCookieEchoChunk { Cookie = initAck.StateCookie });
         _state = SctpAssociationState.CookieEchoed;
-        _logger?.LogDebug("SCTP state={State}", _state);
+        if (_logger?.IsEnabled(LogLevel.Debug) == true)
+        {
+            _logger.LogDebug("SCTP state={State}", _state);
+        }
     }
 
     public event EventHandler? OnEstablished;
 
-    private async Task HandleCookieEcho(SctpPacket _, SctpChunk chunk)
+    private async Task HandleCookieEcho(SctpChunk chunk)
     {
         _logger?.LogDebug("SCTP received CookieEcho");
         if (chunk is not SctpCookieEchoChunk cookieEcho
@@ -409,7 +447,10 @@ public partial class SctpAssociation : IDisposable
 
         await SendChunkInternalAsync(new SctpSimpleChunk { Type = SctpChunkType.CookieAck, Length = 4 });
         _state = SctpAssociationState.Established;
-        _logger?.LogInformation("SCTP state={State} after CookieEcho", _state);
+        if (_logger?.IsEnabled(LogLevel.Information) == true)
+        {
+            _logger.LogInformation("SCTP state={State} after CookieEcho", _state);
+        }
         OnEstablished?.Invoke(this, EventArgs.Empty);
     }
 
@@ -426,7 +467,23 @@ public partial class SctpAssociation : IDisposable
 
     public void Dispose()
     {
+        Dispose(disposing: true);
+        GC.SuppressFinalize(this);
+    }
+
+    protected virtual void Dispose(bool disposing)
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
         _state = SctpAssociationState.Closed;
+        if (!disposing)
+        {
+            return;
+        }
+
         _cts.Cancel();
         _inputChannel.Writer.TryComplete();
         foreach (var channel in _dataChannels.Values)
@@ -434,6 +491,5 @@ public partial class SctpAssociation : IDisposable
             channel.SetClosed();
         }
         _cts.Dispose();
-        GC.SuppressFinalize(this);
     }
 }

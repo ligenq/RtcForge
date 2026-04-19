@@ -135,7 +135,7 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
     /// <returns>A snapshot of the current transceivers.</returns>
     public IEnumerable<RTCRtpTransceiver> GetTransceivers()
     {
-        lock (_transceiverLock) { return _transceivers.ToList(); }
+        lock (_transceiverLock) { return [.. _transceivers]; }
     }
 
     /// <summary>
@@ -156,7 +156,7 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
     /// <summary>
     /// Occurs when a remote media track is discovered.
     /// </summary>
-    public event EventHandler<RTCTrackEvent>? OnTrack;
+    public event EventHandler<RTCTrackEventArgs>? OnTrack;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="RTCPeerConnection"/> class.
@@ -177,13 +177,16 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
         {
             _iceAgent.SetTransportPolicy(configuration.IceTransportPolicy);
         }
-        _iceAgent.OnLocalCandidate += (s, c) => OnIceCandidate?.Invoke(this, c);
+        _iceAgent.OnLocalCandidate += (_, c) => OnIceCandidate?.Invoke(this, c);
         _iceAgent.OnStateChange += HandleIceStateChange;
-        _iceAgent.OnDtlsPacket += (s, p) =>
+        _iceAgent.OnDtlsPacket += (_, p) =>
         {
             var data = p.Span.ToArray();
             var transport = _dtlsTransport;
-            _logger?.LogDebug("RTCPeerConnection received DTLS packet bytes={Bytes} transportReady={TransportReady}", data.Length, transport != null);
+            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+            {
+                _logger.LogDebug("RTCPeerConnection received DTLS packet bytes={Bytes} transportReady={TransportReady}", data.Length, transport != null);
+            }
             if (transport != null)
             {
                 transport.HandleIncomingPacket(data);
@@ -202,12 +205,9 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
     {
         ReadOnlyMemory<byte> rtcpData = packet.Data;
         var srtp = _srtpSession;
-        if (srtp != null)
+        if (srtp != null && !srtp.UnprotectRtcp(packet.Data, out rtcpData))
         {
-            if (!srtp.UnprotectRtcp(packet.Data, out rtcpData))
-            {
-                return;
-            }
+            return;
         }
 
         var rtcpPackets = RtcpPacket.ParseCompound(rtcpData.Span);
@@ -285,7 +285,7 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
                 {
                     if (_announcedTracks.Add(transceiver.Mid))
                     {
-                        OnTrack?.Invoke(this, new RTCTrackEvent(transceiver.Receiver, transceiver.Receiver.Track, transceiver));
+                        OnTrack?.Invoke(this, new RTCTrackEventArgs(transceiver.Receiver, transceiver.Receiver.Track, transceiver));
                     }
                 }
                 transceiver.Receiver.HandleRtpPacketAsync(rtpPacket).FireAndForget();
@@ -405,13 +405,19 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
 
     private async Task InitializeDtlsAsync(bool isClient)
     {
-        _logger?.LogInformation("Initializing DTLS as {Role}", isClient ? "client" : "server");
+        if (_logger?.IsEnabled(LogLevel.Information) == true)
+        {
+            _logger.LogInformation("Initializing DTLS as {Role}", isClient ? "client" : "server");
+        }
         _dtlsTransport = new DtlsTransport(_iceAgent.SendDataAsync, _dtlsCertificate, _loggerFactory);
 
         // Flush any DTLS packets that arrived before _dtlsTransport was set.
         while (_earlyDtlsPackets.TryDequeue(out var early))
         {
-            _logger?.LogDebug("Flushing early DTLS packet bytes={Bytes}", early.Length);
+            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+            {
+                _logger.LogDebug("Flushing early DTLS packet bytes={Bytes}", early.Length);
+            }
             _dtlsTransport.HandleIncomingPacket(early);
         }
 
@@ -427,7 +433,7 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
             }
         }
 
-        _dtlsTransport.OnData += (s, data) => HandleIncomingDtlsApplicationDataAsync(data);
+        _dtlsTransport.OnData += (_, data) => HandleIncomingDtlsApplicationData(data);
 
         SdpMessage? remoteDesc;
         lock (_stateLock) { remoteDesc = _remoteDescription; }
@@ -450,7 +456,7 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
 
         _dtlsTransport.SetRemoteFingerprint(parts[0], parts[1]);
 
-        _dtlsTransport.OnStateChange += async (s, state) =>
+        _dtlsTransport.OnStateChange += async (_, state) =>
         {
             if (state == DtlsState.Connected)
             {
@@ -465,7 +471,10 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
 
                     if (ShouldNegotiateDataChannels())
                     {
-                        _logger?.LogInformation("Initializing SCTP for data channels as {Role}", isClient ? "client" : "server");
+                        if (_logger?.IsEnabled(LogLevel.Information) == true)
+                        {
+                            _logger.LogInformation("Initializing SCTP for data channels as {Role}", isClient ? "client" : "server");
+                        }
                         await InitializeSctpAsync(isClient);
                     }
                 }
@@ -484,10 +493,13 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
         await _dtlsTransport.StartAsync(isClient);
     }
 
-    private Task HandleIncomingDtlsApplicationDataAsync(byte[] data)
+    private void HandleIncomingDtlsApplicationData(byte[] data)
     {
-        _logger?.LogDebug("DTLS application data received bytes={Bytes} sctpReady={SctpReady}", data.Length, _sctpAssociation != null);
-        return _sctpAssociation?.HandlePacketAsync(data) ?? Task.CompletedTask;
+        if (_logger?.IsEnabled(LogLevel.Debug) == true)
+        {
+            _logger.LogDebug("DTLS application data received bytes={Bytes} sctpReady={SctpReady}", data.Length, _sctpAssociation != null);
+        }
+        _sctpAssociation?.HandlePacketAsync(data).FireAndForget();
     }
 
     private async Task InitializeSctpAsync(bool isClient)
@@ -499,31 +511,40 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
             }
         }, _loggerFactory, _timeProvider);
 
-        _sctpAssociation.OnRemoteDataChannel += (s, dc) =>
+        _sctpAssociation.OnRemoteDataChannel += (_, dc) =>
         {
-            _logger?.LogInformation("Remote data channel opened label={Label} id={Id}", dc.Label, dc.Id);
+            if (_logger?.IsEnabled(LogLevel.Information) == true)
+            {
+                _logger.LogInformation("Remote data channel opened label={Label} id={Id}", dc.Label, dc.Id);
+            }
             lock (_dataChannelLock) { _dataChannels.Add(dc); }
             OnDataChannel?.Invoke(this, dc);
         };
 
-        _sctpAssociation.OnEstablished += (s, e) =>
+        _sctpAssociation.OnEstablished += (_, _) =>
         {
             _logger?.LogInformation("SCTP association established");
             List<RTCDataChannel> snapshot;
-            lock (_dataChannelLock) { snapshot = _dataChannels.ToList(); }
+            lock (_dataChannelLock) { snapshot = [.. _dataChannels]; }
             foreach (var dc in snapshot)
             {
                 dc.SetAssociation(_sctpAssociation!);
                 _sctpAssociation!.RegisterDataChannel(dc);
                 if (dc.ReadyState == RTCDataChannelState.Connecting)
                 {
-                    _logger?.LogDebug("Sending DCEP open for local data channel label={Label} id={Id}", dc.Label, dc.Id);
+                    if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                    {
+                        _logger.LogDebug("Sending DCEP open for local data channel label={Label} id={Id}", dc.Label, dc.Id);
+                    }
                     _sctpAssociation!.SendDataAsync(dc.Id, 50, new Sctp.DcepMessage { Type = Sctp.DcepMessageType.DataChannelOpen, Label = dc.Label }.Serialize()).FireAndForget();
                 }
             }
         };
 
-        _logger?.LogInformation("Starting SCTP association as {Role}", isClient ? "client" : "server");
+        if (_logger?.IsEnabled(LogLevel.Information) == true)
+        {
+            _logger.LogInformation("Starting SCTP association as {Role}", isClient ? "client" : "server");
+        }
         await _sctpAssociation.StartAsync(isClient);
     }
 
@@ -553,7 +574,7 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
         offer.Attributes.Add(new SdpAttribute { Name = "ice-pwd", Value = _iceAgent.LocalPassword });
 
         List<RTCRtpTransceiver> snapshot;
-        lock (_transceiverLock) { snapshot = _transceivers.ToList(); }
+        lock (_transceiverLock) { snapshot = [.. _transceivers]; }
         foreach (var transceiver in snapshot)
         {
             offer.MediaDescriptions.Add(CreateMediaDescription(transceiver, transceiver.Direction));
@@ -570,7 +591,7 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
     /// Creates an SDP answer for the current remote offer.
     /// </summary>
     /// <returns>The generated SDP answer.</returns>
-    public async Task<SdpMessage> CreateAnswerAsync()
+    public Task<SdpMessage> CreateAnswerAsync()
     {
         _iceAgent.StartGatheringAsync().FireAndForget();
         var answer = new SdpMessage { SessionName = "RtcForge Session" };
@@ -594,7 +615,7 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
         answer.Attributes.Add(new SdpAttribute { Name = "ice-pwd", Value = _iceAgent.LocalPassword });
 
         List<RTCRtpTransceiver> snapshot;
-        lock (_transceiverLock) { snapshot = _transceivers.ToList(); }
+        lock (_transceiverLock) { snapshot = [.. _transceivers]; }
         foreach (var transceiver in snapshot)
         {
             var direction = ResolveAnswerDirection(transceiver);
@@ -606,7 +627,7 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
             answer.MediaDescriptions.Add(CreateDataChannelMediaDescription());
         }
 
-        return answer;
+        return Task.FromResult(answer);
     }
 
     /// <summary>
@@ -781,7 +802,18 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
     /// </summary>
     public void Dispose()
     {
+        Dispose(disposing: true);
+        GC.SuppressFinalize(this);
+    }
+
+    protected virtual void Dispose(bool disposing)
+    {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
+        if (!disposing)
         {
             return;
         }
@@ -813,11 +845,14 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
             return;
         }
 
-        _cts.Cancel();
+        await _cts.CancelAsync().ConfigureAwait(false);
         if (_sctpAssociation != null)
         {
             try { await _sctpAssociation.ShutdownAsync().WaitAsync(TimeSpan.FromSeconds(5), _timeProvider); }
-            catch (TimeoutException) { }
+            catch (TimeoutException)
+            {
+                // Continue disposal even if the SCTP close handshake does not finish.
+            }
             _sctpAssociation.Dispose();
         }
         _dtlsTransport?.Dispose();
@@ -832,6 +867,7 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
         _connectionState = PeerConnectionState.Closed;
         _signalingState = SignalingState.Closed;
         _cts.Dispose();
+        GC.SuppressFinalize(this);
     }
 
     internal bool ResolveDtlsClientRole()
@@ -923,7 +959,7 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
         }
     }
 
-    private RTCRtpTransceiverDirection ResolveAnswerDirection(RTCRtpTransceiver transceiver)
+    private static RTCRtpTransceiverDirection ResolveAnswerDirection(RTCRtpTransceiver transceiver)
     {
         bool canSend = transceiver.Sender.Track != null && transceiver.Direction != RTCRtpTransceiverDirection.Inactive;
         var offeredDirection = transceiver.RemoteDirection ?? RTCRtpTransceiverDirection.SendRecv;

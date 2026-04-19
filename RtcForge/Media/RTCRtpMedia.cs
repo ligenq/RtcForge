@@ -55,9 +55,10 @@ public class RTCRtpSender
         }
     }
 
-    internal async Task HandlePliAsync(RtcpPliPacket pli)
+    internal Task HandlePliAsync(RtcpPliPacket _)
     {
         OnPictureLoss?.Invoke(this, EventArgs.Empty);
+        return Task.CompletedTask;
     }
 
     public Task ReplaceTrackAsync(MediaStreamTrack? withTrack)
@@ -122,7 +123,7 @@ public class RTCRtpReceiver
         }
     }
 
-    private bool IsNewer(ushort seq, ushort last)
+    private static bool IsNewer(ushort seq, ushort last)
     {
         return (seq != last) && ((ushort)(seq - last) < 32768);
     }

@@ -11,7 +11,6 @@ public class SrtpCryptoContext
     private readonly byte[] _masterSalt;
     private readonly Aes _aes = Aes.Create();
     private readonly object _aesLock = new();
-    private byte[]? _sessionKey;
     private byte[]? _sessionSalt;
     private byte[]? _sessionAuthKey;
 
@@ -44,10 +43,10 @@ public class SrtpCryptoContext
 
     private void DeriveSessionKeys()
     {
-        _sessionKey = SrtpKeyDerivation.DeriveKey(_masterKey, _masterSalt, 0x00, 16);
+        var sessionKey = SrtpKeyDerivation.DeriveKey(_masterKey, _masterSalt, 0x00, 16);
         _sessionAuthKey = SrtpKeyDerivation.DeriveKey(_masterKey, _masterSalt, 0x01, 20);
         _sessionSalt = SrtpKeyDerivation.DeriveKey(_masterKey, _masterSalt, 0x02, 14);
-        _aes.Key = _sessionKey;
+        _aes.Key = sessionKey;
         _aes.Mode = CipherMode.ECB;
         _aes.Padding = PaddingMode.None;
     }
@@ -87,7 +86,7 @@ public class SrtpCryptoContext
         hmac.AppendData(rocBytes);
 
         Span<byte> fullHash = stackalloc byte[20];
-        if (!hmac.TryGetHashAndReset(fullHash, out int bytesWritten))
+        if (!hmac.TryGetHashAndReset(fullHash, out _))
         {
             return false;
         }
@@ -176,7 +175,6 @@ public class SrtpCryptoContext
         }
 
         rtcp.CopyTo(output);
-        uint ssrc = BinaryPrimitives.ReadUInt32BigEndian(rtcp.Slice(4, 4));
         uint index;
         lock (_srtcpSendLock)
         {

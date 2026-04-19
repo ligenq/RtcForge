@@ -59,7 +59,8 @@ public class PeerConnectionTransportTests
 
     private static Task InvokeDtlsPayloadHandlerAsync(RTCPeerConnection pc, byte[] data)
     {
-        var method = typeof(RTCPeerConnection).GetMethod("HandleIncomingDtlsApplicationDataAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        return (Task)method.Invoke(pc, [data])!;
+        var method = typeof(RTCPeerConnection).GetMethod("HandleIncomingDtlsApplicationData", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        method.Invoke(pc, [data]);
+        return Task.CompletedTask;
     }
 }

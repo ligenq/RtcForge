@@ -760,7 +760,7 @@ internal sealed class WebRtcDataChannelStream : Stream
         bool disposeStarted = Interlocked.Exchange(ref _disposed, 1) == 0;
         if (disposeStarted)
         {
-            _cts.Cancel();
+            await _cts.CancelAsync().ConfigureAwait(false);
             _incomingFrames.Writer.TryComplete();
             _availableFrames.Release();
         }
@@ -771,6 +771,7 @@ internal sealed class WebRtcDataChannelStream : Stream
         }
         catch (OperationCanceledException)
         {
+            // Expected when disposal cancels the message pump.
         }
 
         _cts.Dispose();
@@ -818,6 +819,7 @@ internal sealed class WebRtcDataChannelStream : Stream
         }
         catch (ObjectDisposedException)
         {
+            // The channel can be disposed concurrently with the message pump.
         }
     }
 

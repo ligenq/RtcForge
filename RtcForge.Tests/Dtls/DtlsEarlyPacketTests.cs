@@ -14,8 +14,8 @@ public class DtlsEarlyPacketTests
         DtlsTransport? client = null;
         DtlsTransport? server = null;
 
-        client = new DtlsTransport(async data => server?.HandleIncomingPacket(data), cert1);
-        server = new DtlsTransport(async data => client?.HandleIncomingPacket(data), cert2);
+        client = new DtlsTransport(data => { server?.HandleIncomingPacket(data); return Task.CompletedTask; }, cert1);
+        server = new DtlsTransport(data => { client?.HandleIncomingPacket(data); return Task.CompletedTask; }, cert2);
 
         client.SetRemoteFingerprint("sha-256", cert2.Fingerprint);
         server.SetRemoteFingerprint("sha-256", cert1.Fingerprint);
@@ -59,8 +59,8 @@ public class DtlsEarlyPacketTests
         DtlsTransport? client = null;
         DtlsTransport? server = null;
 
-        client = new DtlsTransport(async data => server?.HandleIncomingPacket(data), cert1);
-        server = new DtlsTransport(async data => client?.HandleIncomingPacket(data), cert2);
+        client = new DtlsTransport(data => { server?.HandleIncomingPacket(data); return Task.CompletedTask; }, cert1);
+        server = new DtlsTransport(data => { client?.HandleIncomingPacket(data); return Task.CompletedTask; }, cert2);
 
         client.SetRemoteFingerprint("sha-256", cert2.Fingerprint);
         server.SetRemoteFingerprint("sha-256", cert1.Fingerprint);
@@ -99,8 +99,8 @@ public class DtlsEarlyPacketTests
         DtlsTransport? client = null;
         DtlsTransport? server = null;
 
-        client = new DtlsTransport(async data => server?.HandleIncomingPacket(data), cert1);
-        server = new DtlsTransport(async data => client?.HandleIncomingPacket(data), cert2);
+        client = new DtlsTransport(data => { server?.HandleIncomingPacket(data); return Task.CompletedTask; }, cert1);
+        server = new DtlsTransport(data => { client?.HandleIncomingPacket(data); return Task.CompletedTask; }, cert2);
 
         client.SetRemoteFingerprint("sha-256", cert2.Fingerprint);
         server.SetRemoteFingerprint("sha-256", cert1.Fingerprint);

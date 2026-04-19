@@ -73,11 +73,7 @@ internal class SctpStream
                 }
             }
 
-            int totalLen = 0;
-            foreach (var fragment in fragments)
-            {
-                totalLen += fragment.UserData.Length;
-            }
+            int totalLen = fragments.Sum(static fragment => fragment.UserData.Length);
 
             byte[] messageData = new byte[totalLen];
             int offset = 0;

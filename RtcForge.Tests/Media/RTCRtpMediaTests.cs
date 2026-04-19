@@ -196,7 +196,7 @@ public class RTCRtpMediaTests
         var receiver = new RTCRtpReceiver(new VideoStreamTrack(), _ => Task.CompletedTask);
         var transceiver = new RTCRtpTransceiver(sender, receiver);
 
-        var trackEvent = new RTCTrackEvent(receiver, receiver.Track, transceiver);
+        var trackEvent = new RTCTrackEventArgs(receiver, receiver.Track, transceiver);
 
         Assert.Same(receiver, trackEvent.Receiver);
         Assert.Same(receiver.Track, trackEvent.Track);

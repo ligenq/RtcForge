@@ -273,7 +273,7 @@ internal class WebRtcTlsClient : DefaultTlsClient
 
     public override TlsAuthentication GetAuthentication() => new WebRtcTlsAuthentication(this);
 
-    private class WebRtcTlsAuthentication : TlsAuthentication
+    private sealed class WebRtcTlsAuthentication : TlsAuthentication
     {
         private readonly WebRtcTlsClient _client;
 

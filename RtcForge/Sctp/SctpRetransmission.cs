@@ -103,7 +103,7 @@ public partial class SctpAssociation
         // Wait for outbound queue to clear
         while (!_cts.IsCancellationRequested)
         {
-            lock (_outboundLock) { if (_outboundQueue.Count == 0)
+            lock (_outboundLock) { if (_outstandingBytes == 0)
                 {
                     break;
                 }
@@ -115,7 +115,7 @@ public partial class SctpAssociation
         await SendChunkInternalAsync(new SctpShutdownChunk { CumulativeTsnAck = _cumulativeTsnAckPoint });
     }
 
-    private async Task HandleShutdown(SctpShutdownChunk _)
+    private async Task HandleShutdown()
     {
         // RFC 4960 Section 9.2
         _state = SctpAssociationState.ShutdownReceived;

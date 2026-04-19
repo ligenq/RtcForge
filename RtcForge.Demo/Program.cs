@@ -512,7 +512,7 @@ internal static class Program
         {
             lock (_messages)
             {
-                return new SessionState(ConnectionState, _messages.ToArray());
+                return new SessionState(ConnectionState, [.. _messages]);
             }
         }
 

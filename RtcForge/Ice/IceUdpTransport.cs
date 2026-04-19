@@ -51,7 +51,7 @@ public class IceUdpTransport : IDisposable
                 try
                 {
                     var result = await _udpClient.Client.ReceiveFromAsync(buffer, SocketFlags.None, remoteEP, _cts.Token);
-                    if (_logger != null && _logger.IsEnabled(LogLevel.Debug))
+                    if (_logger?.IsEnabled(LogLevel.Debug) == true)
                     {
                         byte first = result.ReceivedBytes > 0 ? buffer[0] : (byte)0;
                         _logger.LogDebug(
@@ -68,7 +68,6 @@ public class IceUdpTransport : IDisposable
                 catch (SocketException ex) when (IsIgnorableUdpReceiveError(ex) && !_cts.IsCancellationRequested)
                 {
                     ArrayPool<byte>.Shared.Return(buffer);
-                    continue;
                 }
                 catch
                 {
@@ -77,7 +76,10 @@ public class IceUdpTransport : IDisposable
                 }
             }
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException)
+        {
+            // Expected when the transport is disposed.
+        }
         catch (Exception ex)
         {
             _logger?.LogError(ex, "ReceiveLoop Error on endpoint {LocalEndPoint}", LocalEndPoint);
@@ -115,7 +117,18 @@ public class IceUdpTransport : IDisposable
 
     public void Dispose()
     {
+        Dispose(disposing: true);
+        GC.SuppressFinalize(this);
+    }
+
+    protected virtual void Dispose(bool disposing)
+    {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
+        if (!disposing)
         {
             return;
         }
@@ -124,15 +137,14 @@ public class IceUdpTransport : IDisposable
         _udpClient.Close(); // Close first to unblock ReceiveAsync
         _udpClient.Dispose();
         _cts.Dispose();
-        GC.SuppressFinalize(this);
     }
 }
 
 public struct UdpPacket
 {
-    public byte[] Array;
-    public int Length;
-    public IPEndPoint RemoteEndPoint;
+    public byte[] Array { get; set; }
+    public int Length { get; set; }
+    public IPEndPoint RemoteEndPoint { get; set; }
 
     public ReadOnlySpan<byte> Span => new ReadOnlySpan<byte>(Array, 0, Length);
     public ReadOnlyMemory<byte> Data => new ReadOnlyMemory<byte>(Array, 0, Length);

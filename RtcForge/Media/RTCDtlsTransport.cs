@@ -13,8 +13,6 @@ public enum RTCDtlsTransportState
 
 public sealed class RTCDtlsTransport
 {
-    private readonly IDtlsTransport _internalTransport;
-
     public RTCDtlsTransportState State { get; private set; } = RTCDtlsTransportState.New;
     public RTCIceTransport IceTransport { get; }
 
@@ -22,9 +20,8 @@ public sealed class RTCDtlsTransport
 
     internal RTCDtlsTransport(IDtlsTransport internalTransport, RTCIceTransport iceTransport)
     {
-        _internalTransport = internalTransport;
         IceTransport = iceTransport;
-        _internalTransport.OnStateChange += HandleInternalStateChange;
+        internalTransport.OnStateChange += HandleInternalStateChange;
     }
 
     private void HandleInternalStateChange(object? sender, DtlsState state)

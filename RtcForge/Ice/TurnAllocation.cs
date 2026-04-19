@@ -261,7 +261,7 @@ internal sealed class TurnAllocation : IDisposable
             cloned.Attributes.Add(new StunAttribute
             {
                 Type = attribute.Type,
-                Value = attribute.Value.ToArray()
+                Value = [.. attribute.Value]
             });
         }
 
@@ -320,6 +320,7 @@ internal sealed class TurnAllocation : IDisposable
         }
         catch (OperationCanceledException)
         {
+            // Expected during allocation disposal.
         }
     }
 
