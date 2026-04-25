@@ -51,10 +51,10 @@ public class IceUdpTransport : IDisposable
                 try
                 {
                     var result = await _udpClient.Client.ReceiveFromAsync(buffer, SocketFlags.None, remoteEP, _cts.Token);
-                    if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                    if (_logger?.IsEnabled(LogLevel.Trace) == true)
                     {
                         byte first = result.ReceivedBytes > 0 ? buffer[0] : (byte)0;
-                        _logger.LogDebug(
+                        _logger.LogTrace(
                             "IceUdpTransport {Local} rx bytes={Bytes} from={Remote} first=0x{First:X2} class={Class}",
                             LocalEndPoint, result.ReceivedBytes, result.RemoteEndPoint, first, ClassifyFirstByte(first));
                     }

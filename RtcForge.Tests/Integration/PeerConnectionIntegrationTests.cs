@@ -216,6 +216,25 @@ public class PeerConnectionIntegrationTests
     }
 
     [Fact]
+    public async Task CreateAnswerAsync_FromRemoteDataChannelOffer_IncludesTransportAttributesOnApplicationMediaSection()
+    {
+        using var offerer = new RTCPeerConnection();
+        using var answerer = new RTCPeerConnection();
+
+        offerer.CreateDataChannel("chat");
+        var offer = await offerer.CreateOfferAsync();
+        await answerer.SetRemoteDescriptionAsync(offer);
+
+        var answer = await answerer.CreateAnswerAsync();
+
+        var application = Assert.Single(answer.MediaDescriptions, md => md.Media == "application");
+        Assert.Contains(application.Attributes, a => a.Name == "ice-ufrag" && !string.IsNullOrWhiteSpace(a.Value));
+        Assert.Contains(application.Attributes, a => a.Name == "ice-pwd" && !string.IsNullOrWhiteSpace(a.Value));
+        Assert.Contains(application.Attributes, a => a.Name == "fingerprint" && !string.IsNullOrWhiteSpace(a.Value));
+        Assert.Contains(application.Attributes, a => a.Name == "setup" && a.Value == "passive");
+    }
+
+    [Fact]
     public async Task CreateAnswerAsync_StartsIceGatheringForAnswerer()
     {
         using var offerer = new RTCPeerConnection();

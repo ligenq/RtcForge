@@ -41,10 +41,10 @@ internal sealed class BouncyCastleDatagramTransport : DatagramTransport
             {
                 int bytesToCopy = Math.Min(buffer.Length, data.Length);
                 data.AsSpan(0, bytesToCopy).CopyTo(buffer);
-                if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                if (_logger?.IsEnabled(LogLevel.Trace) == true)
                 {
                     byte first = bytesToCopy > 0 ? buffer[0] : (byte)0;
-                    _logger.LogDebug("BC-DTLS Receive (immediate) bytesToCopy={Bytes} queueBacklog={Backlog} first=0x{First:X2}", bytesToCopy, _receiveQueue.Count, first);
+                    _logger.LogTrace("BC-DTLS Receive (immediate) bytesToCopy={Bytes} queueBacklog={Backlog} first=0x{First:X2}", bytesToCopy, _receiveQueue.Count, first);
                 }
                 return bytesToCopy;
             }
@@ -55,16 +55,16 @@ internal sealed class BouncyCastleDatagramTransport : DatagramTransport
                 {
                     int bytesToCopy = Math.Min(buffer.Length, data.Length);
                     data.AsSpan(0, bytesToCopy).CopyTo(buffer);
-                    if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                    if (_logger?.IsEnabled(LogLevel.Trace) == true)
                     {
                         byte first = bytesToCopy > 0 ? buffer[0] : (byte)0;
-                        _logger.LogDebug("BC-DTLS Receive (waited) bytesToCopy={Bytes} waitMs={Wait} first=0x{First:X2}", bytesToCopy, waitMillis, first);
+                        _logger.LogTrace("BC-DTLS Receive (waited) bytesToCopy={Bytes} waitMs={Wait} first=0x{First:X2}", bytesToCopy, waitMillis, first);
                     }
                     return bytesToCopy;
                 }
-                if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                if (_logger?.IsEnabled(LogLevel.Trace) == true)
                 {
-                    _logger.LogDebug("BC-DTLS Receive timeout waitMs={Wait} queueBacklog={Backlog}", waitMillis, _receiveQueue.Count);
+                    _logger.LogTrace("BC-DTLS Receive timeout waitMs={Wait} queueBacklog={Backlog}", waitMillis, _receiveQueue.Count);
                 }
             }
             return 0;
@@ -84,10 +84,10 @@ internal sealed class BouncyCastleDatagramTransport : DatagramTransport
 
     public void Send(ReadOnlySpan<byte> buffer)
     {
-        if (_logger?.IsEnabled(LogLevel.Debug) == true)
+        if (_logger?.IsEnabled(LogLevel.Trace) == true)
         {
             byte first = buffer.Length > 0 ? buffer[0] : (byte)0;
-            _logger.LogDebug("BC-DTLS Send (enqueue) bytes={Bytes} first=0x{First:X2}", buffer.Length, first);
+            _logger.LogTrace("BC-DTLS Send (enqueue) bytes={Bytes} first=0x{First:X2}", buffer.Length, first);
         }
         if (!_sendChannel.Writer.TryWrite(buffer.ToArray()))
         {
@@ -116,10 +116,10 @@ internal sealed class BouncyCastleDatagramTransport : DatagramTransport
         {
             await foreach (var data in _sendChannel.Reader.ReadAllAsync().ConfigureAwait(false))
             {
-                if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                if (_logger?.IsEnabled(LogLevel.Trace) == true)
                 {
                     byte first = data.Length > 0 ? data[0] : (byte)0;
-                    _logger.LogDebug("BC-DTLS tx (to wire) bytes={Bytes} first=0x{First:X2}", data.Length, first);
+                    _logger.LogTrace("BC-DTLS tx (to wire) bytes={Bytes} first=0x{First:X2}", data.Length, first);
                 }
                 try
                 {

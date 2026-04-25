@@ -183,9 +183,9 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
         {
             var data = p.Span.ToArray();
             var transport = _dtlsTransport;
-            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+            if (_logger?.IsEnabled(LogLevel.Trace) == true)
             {
-                _logger.LogDebug("RTCPeerConnection received DTLS packet bytes={Bytes} transportReady={TransportReady}", data.Length, transport != null);
+                _logger.LogTrace("RTCPeerConnection received DTLS packet bytes={Bytes} transportReady={TransportReady}", data.Length, transport != null);
             }
             if (transport != null)
             {
@@ -495,9 +495,9 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
 
     private void HandleIncomingDtlsApplicationData(byte[] data)
     {
-        if (_logger?.IsEnabled(LogLevel.Debug) == true)
+        if (_logger?.IsEnabled(LogLevel.Trace) == true)
         {
-            _logger.LogDebug("DTLS application data received bytes={Bytes} sctpReady={SctpReady}", data.Length, _sctpAssociation != null);
+            _logger.LogTrace("DTLS application data received bytes={Bytes} sctpReady={SctpReady}", data.Length, _sctpAssociation != null);
         }
         _sctpAssociation?.HandlePacketAsync(data).FireAndForget();
     }
@@ -575,14 +575,15 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
 
         List<RTCRtpTransceiver> snapshot;
         lock (_transceiverLock) { snapshot = [.. _transceivers]; }
+        const string offerSetup = "actpass";
         foreach (var transceiver in snapshot)
         {
-            offer.MediaDescriptions.Add(CreateMediaDescription(transceiver, transceiver.Direction));
+            offer.MediaDescriptions.Add(CreateMediaDescription(transceiver, transceiver.Direction, offerSetup));
         }
 
         if (ShouldNegotiateDataChannels())
         {
-            offer.MediaDescriptions.Add(CreateDataChannelMediaDescription());
+            offer.MediaDescriptions.Add(CreateDataChannelMediaDescription(offerSetup));
         }
         return offer;
     }
@@ -591,9 +592,9 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
     /// Creates an SDP answer for the current remote offer.
     /// </summary>
     /// <returns>The generated SDP answer.</returns>
-    public Task<SdpMessage> CreateAnswerAsync()
+    public async Task<SdpMessage> CreateAnswerAsync()
     {
-        _iceAgent.StartGatheringAsync().FireAndForget();
+        await _iceAgent.StartGatheringAsync().ConfigureAwait(false);
         var answer = new SdpMessage { SessionName = "RtcForge Session" };
 
         var bundleMids = GetBundleMids();
@@ -609,7 +610,8 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
         SdpMessage? remoteDesc;
         lock (_stateLock) { remoteDesc = _remoteDescription; }
         var remoteSetup = GetAttributeValue(remoteDesc, "setup");
-        answer.Attributes.Add(new SdpAttribute { Name = "setup", Value = remoteSetup == "actpass" ? "passive" : "active" });
+        string answerSetup = remoteSetup == "actpass" ? "passive" : "active";
+        answer.Attributes.Add(new SdpAttribute { Name = "setup", Value = answerSetup });
 
         answer.Attributes.Add(new SdpAttribute { Name = "ice-ufrag", Value = _iceAgent.LocalUfrag });
         answer.Attributes.Add(new SdpAttribute { Name = "ice-pwd", Value = _iceAgent.LocalPassword });
@@ -619,15 +621,15 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
         foreach (var transceiver in snapshot)
         {
             var direction = ResolveAnswerDirection(transceiver);
-            answer.MediaDescriptions.Add(CreateMediaDescription(transceiver, direction));
+            answer.MediaDescriptions.Add(CreateMediaDescription(transceiver, direction, answerSetup));
         }
 
         if (_dataChannelNegotiated)
         {
-            answer.MediaDescriptions.Add(CreateDataChannelMediaDescription());
+            answer.MediaDescriptions.Add(CreateDataChannelMediaDescription(answerSetup));
         }
 
-        return Task.FromResult(answer);
+        return answer;
     }
 
     /// <summary>
@@ -1035,7 +1037,7 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
         return mids;
     }
 
-    private SdpMediaDescription CreateMediaDescription(RTCRtpTransceiver transceiver, RTCRtpTransceiverDirection direction)
+    private SdpMediaDescription CreateMediaDescription(RTCRtpTransceiver transceiver, RTCRtpTransceiverDirection direction, string setupRole)
     {
         var md = new SdpMediaDescription
         {
@@ -1074,11 +1076,11 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
             md.Attributes.Add(new SdpAttribute { Name = "rtcp-fb", Value = "96 nack pli" });
         }
 
-        AppendLocalIceAttributes(md);
+        AppendLocalTransportAttributes(md, setupRole);
         return md;
     }
 
-    private SdpMediaDescription CreateDataChannelMediaDescription()
+    private SdpMediaDescription CreateDataChannelMediaDescription(string setupRole)
     {
         var md = new SdpMediaDescription
         {
@@ -1094,7 +1096,7 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
                 new() { Name = "max-message-size", Value = DefaultMaxMessageSize.ToString() }
             ]
         };
-        AppendLocalIceAttributes(md);
+        AppendLocalTransportAttributes(md, setupRole);
         return md;
     }
 
@@ -1123,8 +1125,13 @@ public class RTCPeerConnection : IAsyncDisposable, IDisposable
                 ?.Value;
     }
 
-    private void AppendLocalIceAttributes(SdpMediaDescription mediaDescription)
+    private void AppendLocalTransportAttributes(SdpMediaDescription mediaDescription, string setupRole)
     {
+        mediaDescription.Attributes.Add(new SdpAttribute { Name = "ice-ufrag", Value = _iceAgent.LocalUfrag });
+        mediaDescription.Attributes.Add(new SdpAttribute { Name = "ice-pwd", Value = _iceAgent.LocalPassword });
+        mediaDescription.Attributes.Add(new SdpAttribute { Name = "fingerprint", Value = $"sha-256 {_dtlsCertificate.Fingerprint}" });
+        mediaDescription.Attributes.Add(new SdpAttribute { Name = "setup", Value = setupRole });
+
         foreach (var candidate in _iceAgent.LocalCandidates)
         {
             var candidateValue = candidate.ToString();

@@ -175,6 +175,136 @@ public class IceAgentTests
     }
 
     [Fact]
+    public async Task HandleBindingRequest_ControlledAgent_SelectsDiscoveredPairBeforeNomination()
+    {
+        using var agent = new IceAgent();
+        agent.IsControlling = false;
+        agent.SetRemoteCredentials("remoteUfrag", "remotePassword");
+        await agent.StartGatheringAsync();
+
+        var transport = ((List<IceUdpTransport>)typeof(IceAgent)
+            .GetField("_transports", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(agent)!).First(t => t.LocalEndPoint.AddressFamily == AddressFamily.InterNetwork);
+        var remoteEndPoint = new IPEndPoint(IPAddress.Loopback, 49152);
+        var request = CreateAuthenticatedBindingRequest(
+            username: $"{agent.LocalUfrag}:remoteUfrag",
+            password: agent.LocalPassword,
+            priority: 1234u,
+            useCandidate: false);
+
+        await InvokeHandleBindingRequestAsync(agent, transport, remoteEndPoint, request);
+
+        var selectedRemote = (IceCandidate?)typeof(IceAgent)
+            .GetField("_selectedRemoteCandidate", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(agent);
+        Assert.NotNull(selectedRemote);
+        Assert.Equal(remoteEndPoint.Address.ToString(), selectedRemote!.Address);
+        Assert.Equal(remoteEndPoint.Port, selectedRemote.Port);
+        Assert.Equal(IceState.Connected, agent.State);
+    }
+
+    [Fact]
+    public async Task HandleBindingRequest_ControlledAgent_UseCandidateCompletesSelectedPair()
+    {
+        using var agent = new IceAgent();
+        agent.IsControlling = false;
+        agent.SetRemoteCredentials("remoteUfrag", "remotePassword");
+        await agent.StartGatheringAsync();
+
+        var transport = ((List<IceUdpTransport>)typeof(IceAgent)
+            .GetField("_transports", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(agent)!).First(t => t.LocalEndPoint.AddressFamily == AddressFamily.InterNetwork);
+        var remoteEndPoint = new IPEndPoint(IPAddress.Loopback, 49152);
+        var request = CreateAuthenticatedBindingRequest(
+            username: $"{agent.LocalUfrag}:remoteUfrag",
+            password: agent.LocalPassword,
+            priority: 1234u,
+            useCandidate: true);
+
+        await InvokeHandleBindingRequestAsync(agent, transport, remoteEndPoint, request);
+
+        Assert.Equal(IceState.Completed, agent.State);
+    }
+
+    [Fact]
+    public async Task HandleBindingRequest_ControlledAgent_NonNominatedCheckDoesNotDowngradeCompletedPair()
+    {
+        using var agent = new IceAgent();
+        agent.IsControlling = false;
+        agent.SetRemoteCredentials("remoteUfrag", "remotePassword");
+        await agent.StartGatheringAsync();
+
+        var transport = ((List<IceUdpTransport>)typeof(IceAgent)
+            .GetField("_transports", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(agent)!).First(t => t.LocalEndPoint.AddressFamily == AddressFamily.InterNetwork);
+        var remoteEndPoint = new IPEndPoint(IPAddress.Loopback, 49152);
+
+        await InvokeHandleBindingRequestAsync(
+            agent,
+            transport,
+            remoteEndPoint,
+            CreateAuthenticatedBindingRequest(
+                username: $"{agent.LocalUfrag}:remoteUfrag",
+                password: agent.LocalPassword,
+                priority: 1234u,
+                useCandidate: true));
+        await InvokeHandleBindingRequestAsync(
+            agent,
+            transport,
+            remoteEndPoint,
+            CreateAuthenticatedBindingRequest(
+                username: $"{agent.LocalUfrag}:remoteUfrag",
+                password: agent.LocalPassword,
+                priority: 1234u,
+                useCandidate: false));
+
+        Assert.Equal(IceState.Completed, agent.State);
+    }
+
+    [Fact]
+    public async Task HandleBindingRequest_ControlledAgent_NonNominatedDifferentPairDoesNotReplaceCompletedPair()
+    {
+        using var agent = new IceAgent();
+        agent.IsControlling = false;
+        agent.SetRemoteCredentials("remoteUfrag", "remotePassword");
+        await agent.StartGatheringAsync();
+
+        var transport = ((List<IceUdpTransport>)typeof(IceAgent)
+            .GetField("_transports", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(agent)!).First(t => t.LocalEndPoint.AddressFamily == AddressFamily.InterNetwork);
+        var nominatedEndPoint = new IPEndPoint(IPAddress.Loopback, 49152);
+        var nonNominatedEndPoint = new IPEndPoint(IPAddress.Loopback, 49153);
+
+        await InvokeHandleBindingRequestAsync(
+            agent,
+            transport,
+            nominatedEndPoint,
+            CreateAuthenticatedBindingRequest(
+                username: $"{agent.LocalUfrag}:remoteUfrag",
+                password: agent.LocalPassword,
+                priority: 1234u,
+                useCandidate: true));
+        await InvokeHandleBindingRequestAsync(
+            agent,
+            transport,
+            nonNominatedEndPoint,
+            CreateAuthenticatedBindingRequest(
+                username: $"{agent.LocalUfrag}:remoteUfrag",
+                password: agent.LocalPassword,
+                priority: 1234u,
+                useCandidate: false));
+
+        var selectedRemote = (IceCandidate?)typeof(IceAgent)
+            .GetField("_selectedRemoteCandidate", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(agent);
+
+        Assert.NotNull(selectedRemote);
+        Assert.Equal(nominatedEndPoint.Address.ToString(), selectedRemote!.Address);
+        Assert.Equal(nominatedEndPoint.Port, selectedRemote.Port);
+        Assert.Equal(IceState.Completed, agent.State);
+    }
+
+    [Fact]
     public void SetRemoteCredentials_IceRestartClearsRemoteCandidatesAndSelectedPair()
     {
         using var agent = new IceAgent();
@@ -249,6 +379,164 @@ public class IceAgentTests
 
         Assert.NotNull(resolved);
         Assert.Equal(3478, resolved!.Port);
+    }
+
+    [Fact]
+    public async Task ResolveRemoteEndPointAsync_WithIpv4PreferredFamily_DropsIpv6Literal()
+    {
+        var candidate = new IceCandidate
+        {
+            Address = "::1",
+            Port = 3478
+        };
+
+        var agent = new IceAgent();
+        var resolved = await agent.ResolveRemoteEndPointAsync(candidate, AddressFamily.InterNetwork, CancellationToken.None);
+
+        // An IPv6 literal cannot be sent from an IPv4 socket — return null instead of
+        // an endpoint that would throw SocketException 10047 on SendToAsync.
+        Assert.Null(resolved);
+    }
+
+    [Fact]
+    public async Task ResolveRemoteEndPointAsync_WithIpv6PreferredFamily_DropsIpv4Literal()
+    {
+        var candidate = new IceCandidate
+        {
+            Address = "127.0.0.1",
+            Port = 3478
+        };
+
+        var agent = new IceAgent();
+        var resolved = await agent.ResolveRemoteEndPointAsync(candidate, AddressFamily.InterNetworkV6, CancellationToken.None);
+
+        Assert.Null(resolved);
+    }
+
+    [Fact]
+    public async Task ResolveRemoteEndPointAsync_WithMatchingPreferredFamily_KeepsLiteral()
+    {
+        var candidate = new IceCandidate
+        {
+            Address = "127.0.0.1",
+            Port = 3478
+        };
+
+        var agent = new IceAgent();
+        var resolved = await agent.ResolveRemoteEndPointAsync(candidate, AddressFamily.InterNetwork, CancellationToken.None);
+
+        Assert.NotNull(resolved);
+        Assert.Equal(AddressFamily.InterNetwork, resolved!.AddressFamily);
+        Assert.Equal(3478, resolved.Port);
+    }
+
+    [Fact]
+    public async Task ResolveRemoteEndPointAsync_HostnameResolvedPerFamily_IndependentlyCached()
+    {
+        // `localhost` resolves to both 127.0.0.1 and ::1 on most systems. A single
+        // hostname-keyed cache would hand one family to callers asking for the other,
+        // which is the bug that surfaces as SocketException 10047 on send.
+        var candidate = new IceCandidate
+        {
+            Address = "localhost",
+            Port = 3478
+        };
+
+        var agent = new IceAgent();
+        var ipv4 = await agent.ResolveRemoteEndPointAsync(candidate, AddressFamily.InterNetwork, CancellationToken.None);
+        var ipv6 = await agent.ResolveRemoteEndPointAsync(candidate, AddressFamily.InterNetworkV6, CancellationToken.None);
+
+        if (ipv4 != null)
+        {
+            Assert.Equal(AddressFamily.InterNetwork, ipv4.AddressFamily);
+        }
+        if (ipv6 != null)
+        {
+            Assert.Equal(AddressFamily.InterNetworkV6, ipv6.AddressFamily);
+        }
+        // At least one family must resolve on a functioning host.
+        Assert.True(ipv4 != null || ipv6 != null);
+    }
+
+    [Fact]
+    public void AreCandidateAddressFamiliesCompatible_AllowsHostnameRemoteForIpv6LocalCandidate()
+    {
+        var local = new IceCandidate
+        {
+            Foundation = "1",
+            Component = 1,
+            Protocol = "udp",
+            Priority = 1,
+            Address = "::1",
+            Port = 5000,
+            Type = IceCandidateType.Host
+        };
+        var remote = new IceCandidate
+        {
+            Foundation = "2",
+            Component = 1,
+            Protocol = "udp",
+            Priority = 1,
+            Address = "localhost",
+            Port = 5001,
+            Type = IceCandidateType.Host
+        };
+
+        Assert.True(InvokeAreCandidateAddressFamiliesCompatible(local, remote));
+    }
+
+    [Fact]
+    public async Task ResolveRemoteEndPointAsync_MdnsHostname_IsDeferred()
+    {
+        var candidate = new IceCandidate
+        {
+            Address = "dffb91e0-526b-4dcd-a470-29ad7254a970.local",
+            Port = 3478
+        };
+
+        var agent = new IceAgent();
+        var resolved = await agent.ResolveRemoteEndPointAsync(candidate, AddressFamily.InterNetwork, CancellationToken.None);
+
+        Assert.Null(resolved);
+    }
+
+    [Fact]
+    public async Task ConnectAsync_WithOnlyDeferredMdnsCandidates_WaitsForRescueSignal()
+    {
+        using var agent = new IceAgent();
+        using var transport = new IceUdpTransport();
+        agent.SetRemoteCredentials("remoteUfrag", "remotePwd");
+
+        SetPrivateField(agent, "_transports", new List<IceUdpTransport> { transport });
+        SetPrivateField(agent, "_localCandidates", new List<IceCandidate>
+        {
+            new()
+            {
+                Foundation = "1",
+                Component = 1,
+                Protocol = "udp",
+                Priority = 1,
+                Address = "127.0.0.1",
+                Port = transport.LocalEndPoint.Port,
+                Type = IceCandidateType.Host
+            }
+        });
+        SetPrivateField(agent, "_remoteCandidates", new List<IceCandidate>
+        {
+            new()
+            {
+                Foundation = "2",
+                Component = 1,
+                Protocol = "udp",
+                Priority = 1,
+                Address = "dffb91e0-526b-4dcd-a470-29ad7254a970.local",
+                Port = 3478,
+                Type = IceCandidateType.Host
+            }
+        });
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => agent.ConnectAsync(cts.Token));
     }
 
     [Fact]
@@ -344,6 +632,43 @@ public class IceAgentTests
         byte[] buffer = new byte[sizeof(ulong)];
         BinaryPrimitives.WriteUInt64BigEndian(buffer, value);
         return new StunAttribute { Type = type, Value = buffer };
+    }
+
+    private static StunMessage CreateAuthenticatedBindingRequest(string username, string password, uint priority, bool useCandidate)
+    {
+        var request = new StunMessage
+        {
+            Type = StunMessageType.BindingRequest,
+            TransactionId = Guid.NewGuid().ToByteArray().AsSpan(0, 12).ToArray()
+        };
+        request.Attributes.Add(new StunAttribute { Type = StunAttributeType.Username, Value = System.Text.Encoding.UTF8.GetBytes(username) });
+        request.Attributes.Add(CreateUInt32Attribute(StunAttributeType.Priority, priority));
+        request.Attributes.Add(CreateUInt64Attribute(StunAttributeType.IceControlling, 1234UL));
+        if (useCandidate)
+        {
+            request.Attributes.Add(new StunAttribute { Type = StunAttributeType.UseCandidate, Value = [] });
+        }
+
+        request.Attributes.Add(new StunAttribute { Type = StunAttributeType.MessageIntegrity });
+        request.Attributes.Add(new StunAttribute { Type = StunAttributeType.Fingerprint });
+
+        byte[] buffer = new byte[request.GetSerializedLength()];
+        request.Serialize(buffer, System.Text.Encoding.UTF8.GetBytes(password));
+        Assert.True(StunMessage.TryParse(buffer, out var parsed));
+        return parsed!;
+    }
+
+    private static async Task InvokeHandleBindingRequestAsync(IceAgent agent, IceUdpTransport transport, IPEndPoint remoteEndPoint, StunMessage request)
+    {
+        var method = typeof(IceAgent).GetMethod("HandleBindingRequestAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var task = (Task)method.Invoke(agent, [transport, remoteEndPoint, request])!;
+        await task;
+    }
+
+    private static bool InvokeAreCandidateAddressFamiliesCompatible(IceCandidate local, IceCandidate remote)
+    {
+        var method = typeof(IceAgent).GetMethod("AreCandidateAddressFamiliesCompatible", BindingFlags.Static | BindingFlags.NonPublic)!;
+        return (bool)method.Invoke(null, [local, remote])!;
     }
 
     private static UdpClient StartFakeStunServer(Func<UdpReceiveResult, bool> shouldRespond, CancellationToken cancellationToken, IPAddress? reportedAddress, out int port)

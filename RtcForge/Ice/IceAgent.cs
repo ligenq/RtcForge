@@ -14,6 +14,8 @@ public class IceAgent : IIceAgent
 {
     private static readonly TimeSpan ConsentInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan ConsentTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan DeferredMdnsGracePeriod = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan DeferredMdnsPollInterval = TimeSpan.FromMilliseconds(100);
     // ICE pair-check tracing is emitted at Debug level via the supplied logger. It used to
     // be gated behind the RTCFORGE_TRACE_ICE=1 environment variable; that made connectivity
     // problems effectively invisible when debugging. Callers that don't want the spam can
@@ -31,7 +33,7 @@ public class IceAgent : IIceAgent
     private readonly ulong _tieBreaker;
     private readonly List<RTCIceServer> _iceServers = [];
     private readonly Dictionary<string, TurnAllocation> _turnAllocations = [];
-    private readonly ConcurrentDictionary<string, Task<IPAddress?>> _hostnameResolutionCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<HostnameResolutionKey, Task<IPAddress?>> _hostnameResolutionCache = new();
     private IceUdpTransport? _selectedTransport;
     private IceCandidate? _selectedLocalCandidate;
     private IceCandidate? _selectedRemoteCandidate;
@@ -506,9 +508,9 @@ public class IceAgent : IIceAgent
         }
         else if (firstByte >= 20 && firstByte <= 63)
         {
-            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+            if (_logger?.IsEnabled(LogLevel.Trace) == true)
             {
-                _logger.LogDebug(
+                _logger.LogTrace(
                     "IceAgent DTLS-classified rx bytes={Bytes} from={Remote} local={Local} first=0x{First:X2} subscribers={Subs}",
                     packet.Length, packet.RemoteEndPoint, transport.LocalEndPoint, firstByte,
                     OnDtlsPacket?.GetInvocationList().Length ?? 0);
@@ -612,12 +614,17 @@ public class IceAgent : IIceAgent
         var localCandidate = GetLocalCandidateForTransport(transport);
         var remoteCandidate = GetOrCreateRemoteCandidate(remoteEndPoint, request);
 
+        bool useCandidate = request.Attributes.Any(a => a.Type == StunAttributeType.UseCandidate);
+
         if (!IsControlling
-            && request.Attributes.Any(a => a.Type == StunAttributeType.UseCandidate)
             && localCandidate != null
             && remoteCandidate != null)
         {
-            SelectPair(transport, localCandidate, remoteCandidate, nominated: true);
+            // A controlled full ICE agent must learn and use valid peer-reflexive pairs
+            // discovered by inbound checks. Some WebRTC implementations do not send the
+            // nominated check immediately; without selecting the valid pair here, callers
+            // can time out even though STUN connectivity has already been proven.
+            SelectPair(transport, localCandidate, remoteCandidate, nominated: useCandidate);
         }
         else if (IsControlling
             && localCandidate != null
@@ -749,155 +756,197 @@ public class IceAgent : IIceAgent
         await _connectGate.WaitAsync(connectToken).ConfigureAwait(false);
         try
         {
-            connectToken.ThrowIfCancellationRequested();
-            // Clear the coalescing flag now that we hold the gate and are about
-            // to snapshot candidates. Any AddRemoteCandidate that wins the CAS
-            // after this point will schedule a follow-up ConnectAsync which will
-            // run as soon as we release the gate.
-            Interlocked.Exchange(ref _connectKickPending, 0);
-            State = IceState.Checking;
-            _checklist.Clear();
-            List<IceCandidate> localSnapshot, remoteSnapshot;
-            lock (_candidateLock)
+            DateTimeOffset? deferredMdnsDeadline = null;
+            while (true)
             {
-                localSnapshot = [.. _localCandidates];
-                remoteSnapshot = [.. _remoteCandidates];
-            }
-            if (_logger?.IsEnabled(LogLevel.Information) == true)
-            {
-                _logger.LogInformation("IceAgent pair-check starting: {LocalCount} local x {RemoteCount} remote candidates", localSnapshot.Count, remoteSnapshot.Count);
-            }
-            foreach (var local in localSnapshot)
-            {
-                foreach (var remote in remoteSnapshot)
+                connectToken.ThrowIfCancellationRequested();
+                // Clear the coalescing flag now that we hold the gate and are about
+                // to snapshot candidates. Any AddRemoteCandidate that wins the CAS
+                // after this point will schedule a follow-up ConnectAsync which will
+                // run as soon as we release the gate.
+                Interlocked.Exchange(ref _connectKickPending, 0);
+                State = IceState.Checking;
+                _checklist.Clear();
+                List<IceCandidate> localSnapshot, remoteSnapshot;
+                lock (_candidateLock)
                 {
-                    if (!AreCandidateAddressFamiliesCompatible(local, remote))
-                    {
-                        Trace($"skipping incompatible pair local={local.Address}:{local.Port} remote={remote.Address}:{remote.Port}");
-                        continue;
-                    }
-
-                    _checklist.Add(new IceCandidatePair(local, remote));
+                    localSnapshot = [.. _localCandidates];
+                    remoteSnapshot = [.. _remoteCandidates];
                 }
-            }
-
-            _checklist.Sort((a, b) => b.Priority.CompareTo(a.Priority));
-
-            // Dispatch all pair checks concurrently. Sequential checks burn the full
-            // STUN retransmission budget (~15s) on each unreachable pair, so unreachable
-            // high-priority host-host pairs would prevent lower-priority srflx-srflx pairs
-            // from ever being tried inside a realistic connect timeout.
-            using var pairCts = CancellationTokenSource.CreateLinkedTokenSource(connectToken);
-            var pending = _checklist
-                .Where(p => p.State != IceState.Connected)
-                .Select(p => TryPairCheckAsync(p, pairCts.Token))
-                .ToList();
-
-            (IceUdpTransport Transport, IceCandidatePair Pair, IPEndPoint RemoteEp)? winner = null;
-            var successful = new List<(IceUdpTransport Transport, IceCandidatePair Pair, IPEndPoint RemoteEp)>();
-            DateTimeOffset? firstSuccessAt = null;
-            var nominationGrace = TimeSpan.FromMilliseconds(200);
-            while (pending.Count > 0)
-            {
-                Task<(IceUdpTransport Transport, IceCandidatePair Pair, IPEndPoint RemoteEp)?> completed;
-                if (successful.Count > 0)
+                if (_logger?.IsEnabled(LogLevel.Information) == true)
                 {
-                    var best = successful.MaxBy(s => s.Pair.Priority);
-                    bool higherPriorityStillPending = pending.Any(t =>
-                        !t.IsCompleted
-                        && _checklist.Any(pair =>
-                            pair.State == IceState.Checking
-                            && pair.Priority > best.Pair.Priority));
-                    TimeSpan elapsedSinceFirstSuccess = firstSuccessAt.HasValue
-                        ? _timeProvider.GetUtcNow() - firstSuccessAt.Value
-                        : TimeSpan.Zero;
-
-                    if (!higherPriorityStillPending || elapsedSinceFirstSuccess >= nominationGrace)
-                    {
-                        winner = best;
-                        break;
-                    }
-
-                    var pendingCompletion = Task.WhenAny(pending);
-                    var graceDelay = Task.Delay(nominationGrace - elapsedSinceFirstSuccess, _timeProvider, cancellationToken);
-                    var next = await Task.WhenAny(pendingCompletion, graceDelay).ConfigureAwait(false);
-                    if (next == graceDelay)
-                    {
-                        winner = best;
-                        break;
-                    }
-
-                    completed = await pendingCompletion.ConfigureAwait(false);
+                    _logger.LogInformation("IceAgent pair-check starting: {LocalCount} local x {RemoteCount} remote candidates", localSnapshot.Count, remoteSnapshot.Count);
                 }
-                else
+                foreach (var local in localSnapshot)
                 {
-                    completed = await Task.WhenAny(pending).ConfigureAwait(false);
-                }
-
-                pending.Remove(completed);
-                try
-                {
-                    var result = await completed.ConfigureAwait(false);
-                    if (result.HasValue)
+                    foreach (var remote in remoteSnapshot)
                     {
-                        successful.Add(result.Value);
-                        firstSuccessAt ??= _timeProvider.GetUtcNow();
+                        if (!AreCandidateAddressFamiliesCompatible(local, remote))
+                        {
+                            Trace($"skipping incompatible pair local={local.Address}:{local.Port} remote={remote.Address}:{remote.Port}");
+                            continue;
+                        }
+
+                        _checklist.Add(new IceCandidatePair(local, remote));
                     }
                 }
-                catch (OperationCanceledException)
+
+                bool hasDeferredMdnsCandidates = remoteSnapshot.Any(candidate => ShouldDeferMdnsHostnameCandidate(candidate.Address));
+
+                _checklist.Sort((a, b) => b.Priority.CompareTo(a.Priority));
+
+                // Dispatch all pair checks concurrently. Sequential checks burn the full
+                // STUN retransmission budget (~15s) on each unreachable pair, so unreachable
+                // high-priority host-host pairs would prevent lower-priority srflx-srflx pairs
+                // from ever being tried inside a realistic connect timeout.
+                using var pairCts = CancellationTokenSource.CreateLinkedTokenSource(connectToken);
+                var pending = _checklist
+                    .Where(p => p.State != IceState.Connected)
+                    .Select(p => TryPairCheckAsync(p, pairCts.Token))
+                    .ToList();
+
+                (IceUdpTransport Transport, IceCandidatePair Pair, IPEndPoint RemoteEp)? winner = null;
+                var successful = new List<(IceUdpTransport Transport, IceCandidatePair Pair, IPEndPoint RemoteEp)>();
+                DateTimeOffset? firstSuccessAt = null;
+                var nominationGrace = TimeSpan.FromMilliseconds(200);
+                while (pending.Count > 0)
                 {
-                    // Expected after a winner is selected or connect is canceled.
+                    Task<(IceUdpTransport Transport, IceCandidatePair Pair, IPEndPoint RemoteEp)?> completed;
+                    if (successful.Count > 0)
+                    {
+                        var best = successful.MaxBy(s => s.Pair.Priority);
+                        bool higherPriorityStillPending = pending.Any(t =>
+                            !t.IsCompleted
+                            && _checklist.Any(pair =>
+                                pair.State == IceState.Checking
+                                && pair.Priority > best.Pair.Priority));
+                        TimeSpan elapsedSinceFirstSuccess = firstSuccessAt.HasValue
+                            ? _timeProvider.GetUtcNow() - firstSuccessAt.Value
+                            : TimeSpan.Zero;
+
+                        if (!higherPriorityStillPending || elapsedSinceFirstSuccess >= nominationGrace)
+                        {
+                            winner = best;
+                            break;
+                        }
+
+                        var pendingCompletion = Task.WhenAny(pending);
+                        var graceDelay = Task.Delay(nominationGrace - elapsedSinceFirstSuccess, _timeProvider, cancellationToken);
+                        var next = await Task.WhenAny(pendingCompletion, graceDelay).ConfigureAwait(false);
+                        if (next == graceDelay)
+                        {
+                            winner = best;
+                            break;
+                        }
+
+                        completed = await pendingCompletion.ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        completed = await Task.WhenAny(pending).ConfigureAwait(false);
+                    }
+
+                    pending.Remove(completed);
+                    try
+                    {
+                        var result = await completed.ConfigureAwait(false);
+                        if (result.HasValue)
+                        {
+                            successful.Add(result.Value);
+                            firstSuccessAt ??= _timeProvider.GetUtcNow();
+                        }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Expected after a winner is selected or connect is canceled.
+                    }
                 }
-            }
 
-            if (!winner.HasValue && successful.Count > 0)
-            {
-                winner = successful.MaxBy(s => s.Pair.Priority);
-            }
-
-            await pairCts.CancelAsync().ConfigureAwait(false);
-            foreach (var t in pending)
-            {
-                _ = t.ContinueWith(
-                    static completed => _ = completed.Exception,
-                    CancellationToken.None,
-                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
-                    TaskScheduler.Default);
-            }
-
-            if (winner.HasValue)
-            {
-                var (transport, pair, remoteEp) = winner.Value;
-                if (IsControlling)
+                if (!winner.HasValue && successful.Count > 0)
                 {
-                    var nomination = await SendStunBindingRequestAsync(transport, remoteEp, useCandidate: true, cancellationToken: connectToken).ConfigureAwait(false);
-                    if (nomination?.Type == StunMessageType.BindingSuccessResponse)
+                    winner = successful.MaxBy(s => s.Pair.Priority);
+                }
+
+                await pairCts.CancelAsync().ConfigureAwait(false);
+                foreach (var t in pending)
+                {
+                    _ = t.ContinueWith(
+                        static completed => _ = completed.Exception,
+                        CancellationToken.None,
+                        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                        TaskScheduler.Default);
+                }
+
+                if (winner.HasValue)
+                {
+                    var (transport, pair, remoteEp) = winner.Value;
+                    if (IsControlling)
+                    {
+                        var nomination = await SendStunBindingRequestAsync(transport, remoteEp, useCandidate: true, cancellationToken: connectToken).ConfigureAwait(false);
+                        if (nomination?.Type == StunMessageType.BindingSuccessResponse)
+                        {
+                            pair.State = IceState.Connected;
+                            SelectPair(transport, pair.Local, pair.Remote, nominated: true);
+                            return true;
+                        }
+                        Trace($"nomination failed local={pair.Local.Address}:{pair.Local.Port} remote={remoteEp} response={nomination?.Type.ToString() ?? "null"}");
+                    }
+                    else
                     {
                         pair.State = IceState.Connected;
-                        SelectPair(transport, pair.Local, pair.Remote, nominated: true);
+                        SelectPair(transport, pair.Local, pair.Remote, nominated: false);
                         return true;
                     }
-                    Trace($"nomination failed local={pair.Local.Address}:{pair.Local.Port} remote={remoteEp} response={nomination?.Type.ToString() ?? "null"}");
                 }
-                else
+
+                if (State == IceState.Connected || State == IceState.Completed)
                 {
-                    pair.State = IceState.Connected;
-                    SelectPair(transport, pair.Local, pair.Remote, nominated: false);
                     return true;
                 }
-            }
 
-            if (State != IceState.Connected && State != IceState.Completed)
-            {
-                State = IceState.Failed;
-            }
+                if (hasDeferredMdnsCandidates)
+                {
+                    deferredMdnsDeadline ??= _timeProvider.GetUtcNow() + DeferredMdnsGracePeriod;
+                    while (_timeProvider.GetUtcNow() < deferredMdnsDeadline.Value)
+                    {
+                        connectToken.ThrowIfCancellationRequested();
 
-            bool success = State == IceState.Connected || State == IceState.Completed;
-            if (_logger?.IsEnabled(LogLevel.Information) == true)
-            {
-                _logger.LogInformation("IceAgent.ConnectAsync exiting (state={State}, success={Success})", State, success);
+                        if (State == IceState.Connected || State == IceState.Completed)
+                        {
+                            return true;
+                        }
+
+                        if (Volatile.Read(ref _connectKickPending) == 1)
+                        {
+                            break;
+                        }
+
+                        await Task.Delay(DeferredMdnsPollInterval, _timeProvider, connectToken).ConfigureAwait(false);
+                    }
+
+                    if (State == IceState.Connected || State == IceState.Completed)
+                    {
+                        return true;
+                    }
+
+                    if (Volatile.Read(ref _connectKickPending) == 1)
+                    {
+                        continue;
+                    }
+                }
+
+                if (State != IceState.Connected && State != IceState.Completed)
+                {
+                    State = IceState.Failed;
+                }
+
+                bool success = State == IceState.Connected || State == IceState.Completed;
+                if (_logger?.IsEnabled(LogLevel.Information) == true)
+                {
+                    _logger.LogInformation("IceAgent.ConnectAsync exiting (state={State}, success={Success})", State, success);
+                }
+                return success;
             }
-            return success;
         }
         finally
         {
@@ -916,7 +965,7 @@ public class IceAgent : IIceAgent
                 return null;
             }
 
-            var remoteEp = await ResolveRemoteEndPointAsync(pair.Remote, cancellationToken).ConfigureAwait(false);
+            var remoteEp = await ResolveRemoteEndPointAsync(pair.Remote, transport.LocalEndPoint.AddressFamily, cancellationToken).ConfigureAwait(false);
             if (remoteEp == null)
             {
                 Trace($"pair unresolved local={pair.Local} remote={pair.Remote}");
@@ -924,10 +973,7 @@ public class IceAgent : IIceAgent
                 return null;
             }
 
-            if (_logger?.IsEnabled(LogLevel.Information) == true)
-            {
-                _logger.LogInformation("IceAgent checking pair local={Local} remote={Remote}", $"{pair.Local.Address}:{pair.Local.Port}", remoteEp);
-            }
+            _logger?.LogTrace("IceAgent checking pair local={Local} remote={Remote}", $"{pair.Local.Address}:{pair.Local.Port}", remoteEp);
             var response = await SendStunBindingRequestAsync(transport, remoteEp, cancellationToken: cancellationToken).ConfigureAwait(false);
             if (IsRoleConflictResponse(response))
             {
@@ -940,10 +986,7 @@ public class IceAgent : IIceAgent
                 return (transport, pair, remoteEp);
             }
 
-            if (_logger?.IsEnabled(LogLevel.Information) == true)
-            {
-                _logger.LogInformation("IceAgent pair failed local={Local} remote={Remote} response={Response}", $"{pair.Local.Address}:{pair.Local.Port}", remoteEp, response?.Type.ToString() ?? "null");
-            }
+            _logger?.LogTrace("IceAgent pair failed local={Local} remote={Remote} response={Response}", $"{pair.Local.Address}:{pair.Local.Port}", remoteEp, response?.Type.ToString() ?? "null");
             pair.State = IceState.Failed;
             return null;
         }
@@ -958,9 +1001,9 @@ public class IceAgent : IIceAgent
             // the OS routing table rejects with ENETUNREACH) must not abort the whole
             // connectivity check. Log, mark the pair as failed, and let the other
             // parallel checks proceed.
-            if (_logger?.IsEnabled(LogLevel.Information) == true)
+            if (_logger?.IsEnabled(LogLevel.Debug) == true)
             {
-                _logger.LogInformation(ex, "IceAgent pair check threw local={Local} remote={Remote}", $"{pair.Local.Address}:{pair.Local.Port}", pair.Remote);
+                _logger.LogDebug(ex, "IceAgent pair check threw local={Local} remote={Remote}", $"{pair.Local.Address}:{pair.Local.Port}", pair.Remote);
             }
             pair.State = IceState.Failed;
             return null;
@@ -979,7 +1022,7 @@ public class IceAgent : IIceAgent
             return;
         }
 
-        var remoteEp = await ResolveRemoteEndPointAsync(_selectedRemoteCandidate, _cts.Token).ConfigureAwait(false);
+        var remoteEp = await ResolveRemoteEndPointAsync(_selectedRemoteCandidate, _selectedTransport.LocalEndPoint.AddressFamily, _cts.Token).ConfigureAwait(false);
         if (remoteEp == null)
         {
             return;
@@ -999,12 +1042,32 @@ public class IceAgent : IIceAgent
 
     private void SelectPair(IceUdpTransport transport, IceCandidate local, IceCandidate remote, bool nominated)
     {
+        bool samePair = _selectedTransport == transport
+            && _selectedLocalCandidate != null
+            && _selectedRemoteCandidate != null
+            && AreSameCandidate(_selectedLocalCandidate, local)
+            && AreSameCandidate(_selectedRemoteCandidate, remote);
+        bool isCompleted = State == IceState.Completed;
+        if (!nominated && isCompleted && !samePair)
+        {
+            Trace($"ignored non-nominated pair local={local.Address}:{local.Port} remote={remote.Address}:{remote.Port}; nominated pair already selected");
+            return;
+        }
+
+        bool stateChanges = nominated ? !isCompleted : State == IceState.New || State == IceState.Checking || State == IceState.Failed;
+
         _selectedLocalCandidate = local;
         _selectedTransport = transport;
         _selectedRemoteCandidate = remote;
-        Trace($"selected pair local={local.Address}:{local.Port} remote={remote.Address}:{remote.Port} nominated={nominated}");
-        State = nominated ? IceState.Completed : IceState.Connected;
-        StartConsentFreshnessLoop();
+        if (!samePair || stateChanges)
+        {
+            Trace($"selected pair local={local.Address}:{local.Port} remote={remote.Address}:{remote.Port} nominated={nominated}");
+        }
+        State = nominated || isCompleted ? IceState.Completed : IceState.Connected;
+        if (!samePair || stateChanges)
+        {
+            StartConsentFreshnessLoop();
+        }
     }
 
     private async Task TryNominateDiscoveredPairAsync(IceUdpTransport transport, IceCandidate local, IceCandidate remote)
@@ -1023,7 +1086,7 @@ public class IceAgent : IIceAgent
                 return;
             }
 
-            var remoteEp = await ResolveRemoteEndPointAsync(remote, _cts.Token).ConfigureAwait(false);
+            var remoteEp = await ResolveRemoteEndPointAsync(remote, transport.LocalEndPoint.AddressFamily, _cts.Token).ConfigureAwait(false);
             if (remoteEp == null)
             {
                 Trace($"triggered nomination skipped for unresolved remote={remote.Address}:{remote.Port}");
@@ -1297,7 +1360,7 @@ public class IceAgent : IIceAgent
 
         if (!IPAddress.TryParse(remote.Address, out var remoteAddress))
         {
-            return localAddress.AddressFamily == AddressFamily.InterNetwork;
+            return true;
         }
 
         return localAddress.AddressFamily == remoteAddress.AddressFamily;
@@ -1412,7 +1475,7 @@ public class IceAgent : IIceAgent
                     return;
                 }
 
-                var remoteEp = await ResolveRemoteEndPointAsync(_selectedRemoteCandidate, cancellationToken).ConfigureAwait(false);
+                var remoteEp = await ResolveRemoteEndPointAsync(_selectedRemoteCandidate, _selectedTransport.LocalEndPoint.AddressFamily, cancellationToken).ConfigureAwait(false);
                 bool success = false;
                 if (remoteEp != null)
                 {
@@ -1454,18 +1517,45 @@ public class IceAgent : IIceAgent
         return new string(result);
     }
 
-    internal async Task<IPEndPoint?> ResolveRemoteEndPointAsync(IceCandidate candidate, CancellationToken cancellationToken)
+    internal Task<IPEndPoint?> ResolveRemoteEndPointAsync(IceCandidate candidate, CancellationToken cancellationToken)
+        => ResolveRemoteEndPointAsync(candidate, preferredFamily: null, cancellationToken);
+
+    internal async Task<IPEndPoint?> ResolveRemoteEndPointAsync(IceCandidate candidate, AddressFamily? preferredFamily, CancellationToken cancellationToken)
     {
         if (IPAddress.TryParse(candidate.Address, out var address))
         {
+            if (preferredFamily.HasValue && address.AddressFamily != preferredFamily.Value)
+            {
+                // An IPv6 literal sent from an IPv4 socket (or vice versa) produces
+                // SocketException 10047 ("address family mismatch"). Skip rather than
+                // throw — the pair was already rejected earlier, this is defense in depth.
+                return null;
+            }
             return new IPEndPoint(address, candidate.Port);
         }
 
+        if (ShouldDeferMdnsHostnameCandidate(candidate.Address))
+        {
+            // Browser WebRTC stacks commonly advertise privacy-preserving mDNS host candidates
+            // like `<uuid>.local`. Generic OS DNS resolution is not reliable for these names:
+            // on Windows it can resolve to this machine's own LAN address, which makes ICE
+            // waste its retransmission budget checking itself. Defer these candidates and rely
+            // on peer-reflexive discovery when the remote endpoint sends authenticated STUN.
+            return null;
+        }
+
         // Resolve hostname-based candidates (notably Firefox's `*.local` mDNS candidates) at most
-        // once per address. Windows mDNS resolution can take many seconds per call, and calling
-        // it on every outbound packet stalls the DTLS handshake — Firefox retransmits faster
-        // than we can respond. Caching collapses every subsequent send to an O(1) dictionary hit.
-        var resolveTask = _hostnameResolutionCache.GetOrAdd(candidate.Address, addr => ResolveHostnameAsync(addr, cancellationToken));
+        // once per (address, family) pair. Windows mDNS resolution can take many seconds per call,
+        // and calling it on every outbound packet stalls the DTLS handshake — Firefox retransmits
+        // faster than we can respond. Caching collapses every subsequent send to an O(1) dictionary
+        // hit. The family is part of the key because a hostname may resolve to both an IPv4 and an
+        // IPv6 address; a cache keyed only by hostname would hand an IPv6 result to an IPv4-socket
+        // caller and trigger SocketException 10047 on send.
+        var cacheKey = new HostnameResolutionKey(candidate.Address, preferredFamily);
+        var resolveTask = _hostnameResolutionCache.GetOrAdd(
+            cacheKey,
+            static (key, ct) => ResolveHostnameAsync(key.Hostname, key.PreferredFamily, ct),
+            cancellationToken);
         IPAddress? resolved;
         try
         {
@@ -1473,7 +1563,7 @@ public class IceAgent : IIceAgent
         }
         catch
         {
-            _hostnameResolutionCache.TryRemove(candidate.Address, out _);
+            _hostnameResolutionCache.TryRemove(cacheKey, out _);
             return null;
         }
         if (resolved == null)
@@ -1483,21 +1573,46 @@ public class IceAgent : IIceAgent
         return new IPEndPoint(resolved, candidate.Port);
     }
 
-    private async Task<IPAddress?> ResolveHostnameAsync(string hostname, CancellationToken cancellationToken)
+    private static bool ShouldDeferMdnsHostnameCandidate(string hostname)
+    {
+        return hostname.EndsWith(".local", StringComparison.OrdinalIgnoreCase)
+            && !hostname.Equals("localhost", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static async Task<IPAddress?> ResolveHostnameAsync(string hostname, AddressFamily? preferredFamily, CancellationToken cancellationToken)
     {
         try
         {
             var addresses = await Dns.GetHostAddressesAsync(hostname, cancellationToken).ConfigureAwait(false);
-            var resolved = addresses.FirstOrDefault(ip => ip.AddressFamily == AddressFamily.InterNetwork)
-                ?? addresses.FirstOrDefault();
-            Trace($"resolved {hostname} -> {resolved}");
+            IPAddress? resolved;
+            if (preferredFamily.HasValue)
+            {
+                // Strict: a caller that asked for IPv4 must not silently receive an IPv6 address
+                // (the Socket.SendToAsync will fail with SocketException 10047). Return null so
+                // the pair is marked failed instead of throwing deep inside the send path.
+                resolved = addresses.FirstOrDefault(ip => ip.AddressFamily == preferredFamily.Value);
+            }
+            else
+            {
+                resolved = addresses.FirstOrDefault(ip => ip.AddressFamily == AddressFamily.InterNetwork)
+                    ?? addresses.FirstOrDefault();
+            }
             return resolved;
         }
         catch (SocketException)
         {
-            Trace($"failed to resolve {hostname}");
             return null;
         }
+    }
+
+    internal readonly record struct HostnameResolutionKey(string Hostname, AddressFamily? PreferredFamily)
+    {
+        public bool Equals(HostnameResolutionKey other)
+            => PreferredFamily == other.PreferredFamily
+            && string.Equals(Hostname, other.Hostname, StringComparison.OrdinalIgnoreCase);
+
+        public override int GetHashCode()
+            => HashCode.Combine(StringComparer.OrdinalIgnoreCase.GetHashCode(Hostname), PreferredFamily);
     }
 
     private void Trace(string message)

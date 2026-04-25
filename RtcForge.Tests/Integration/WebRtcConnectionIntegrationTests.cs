@@ -51,6 +51,19 @@ public class WebRtcConnectionIntegrationTests
     }
 
     [Fact]
+    public async Task WebRtcConnection_AcceptOfferAsync_IncludesGatheredIceCandidatesInAnswerSdp()
+    {
+        await using var offerer = new WebRtcConnection();
+        await using var answerer = new WebRtcConnection();
+
+        var offer = await offerer.CreateOfferAndSetLocalAsync();
+        var answer = await answerer.AcceptOfferAsync(offer);
+        var parsed = RtcForge.Sdp.SdpMessage.Parse(answer.Sdp);
+
+        Assert.All(parsed.MediaDescriptions, md => Assert.Contains(md.Attributes, a => a.Name == "candidate"));
+    }
+
+    [Fact]
     public async Task WebRtcConnection_StateStreams_EmitInitialStates()
     {
         await using var connection = new WebRtcConnection();

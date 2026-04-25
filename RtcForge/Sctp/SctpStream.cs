@@ -20,7 +20,7 @@ internal class SctpStream
     {
         bool begin = (chunk.Flags & 0x02) != 0;
         bool end = (chunk.Flags & 0x01) != 0;
-        _logger?.LogDebug("SctpStream {Sid} chunk tsn={Tsn} ssn={Ssn} flags=0x{Flags:X2} B={B} E={E} ppid={Ppid} bytes={Bytes}",
+        _logger?.LogTrace("SctpStream {Sid} chunk tsn={Tsn} ssn={Ssn} flags=0x{Flags:X2} B={B} E={E} ppid={Ppid} bytes={Bytes}",
             StreamId, chunk.Tsn, chunk.StreamSequenceNumber, chunk.Flags, begin, end, chunk.PayloadProtocolId, chunk.UserData?.Length ?? 0);
 
         if (!_reassemblyBuffer.TryGetValue(chunk.StreamSequenceNumber, out var fragments))
@@ -54,7 +54,7 @@ internal class SctpStream
         bool hasBegin = fragments.Any(f => (f.Flags & 0x02) != 0);
         bool hasEnd = fragments.Any(f => (f.Flags & 0x01) != 0);
 
-        _logger?.LogDebug("SctpStream {Sid} ssn={Ssn} fragCount={Count} hasB={HasB} hasE={HasE}",
+        _logger?.LogTrace("SctpStream {Sid} ssn={Ssn} fragCount={Count} hasB={HasB} hasE={HasE}",
             StreamId, chunk.StreamSequenceNumber, fragments.Count, hasBegin, hasEnd);
 
         if (hasBegin && hasEnd)

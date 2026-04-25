@@ -75,9 +75,9 @@ public partial class SctpAssociation : IDisposable
 
     private void DispatchStreamMessage(ushort streamId, uint ppid, byte[] msg)
     {
-        if (_logger?.IsEnabled(LogLevel.Debug) == true)
+        if (_logger?.IsEnabled(LogLevel.Trace) == true)
         {
-            _logger.LogDebug("SCTP stream reassembled streamId={Stream} ppid={Ppid} bytes={Bytes}", streamId, ppid, msg.Length);
+            _logger.LogTrace("SCTP stream reassembled streamId={Stream} ppid={Ppid} bytes={Bytes}", streamId, ppid, msg.Length);
         }
         if (ppid == 50)
         {
@@ -185,10 +185,10 @@ public partial class SctpAssociation : IDisposable
     {
         if (SctpPacket.TryParse(data, out var packet))
         {
-            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+            if (_logger?.IsEnabled(LogLevel.Trace) == true)
             {
                 var types = string.Join(",", packet.Chunks.Select(c => c.Type.ToString()));
-                _logger.LogDebug("SCTP packet rx bytes={Bytes} chunks=[{Types}]", data.Length, types);
+                _logger.LogTrace("SCTP packet rx bytes={Bytes} chunks=[{Types}]", data.Length, types);
             }
             await _inputChannel.Writer.WriteAsync(packet);
         }
@@ -274,9 +274,9 @@ public partial class SctpAssociation : IDisposable
             }
         }
 
-        if (_logger?.IsEnabled(LogLevel.Debug) == true)
+        if (_logger?.IsEnabled(LogLevel.Trace) == true)
         {
-            _logger.LogDebug("SCTP DATA chunk tsn={Tsn} streamId={Stream} ppid={Ppid} payloadBytes={Bytes} isNew={New}",
+            _logger.LogTrace("SCTP DATA chunk tsn={Tsn} streamId={Stream} ppid={Ppid} payloadBytes={Bytes} isNew={New}",
                 data.Tsn, data.StreamId, data.PayloadProtocolId, data.UserData?.Length ?? 0, isNew);
         }
 
