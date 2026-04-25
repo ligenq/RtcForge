@@ -1,5 +1,7 @@
 using Org.BouncyCastle.Tls;
 using RtcForge.Dtls;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 
 namespace RtcForge.Tests.Dtls;
 
@@ -21,6 +23,21 @@ public class DtlsCertificateTests
         Assert.NotEmpty(cert.Fingerprint);
         Assert.Contains(":", cert.Fingerprint);
         Assert.Equal(95, cert.Fingerprint.Length);
+    }
+
+    [Fact]
+    public void Generate_ProducesDotNetReadableEcdsaCertificate()
+    {
+        var cert = DtlsCertificate.Generate();
+        byte[] der = cert.TlsCertificate.GetCertificateAt(0).GetEncoded();
+
+        using var x509 = X509CertificateLoader.LoadCertificate(der);
+        using var publicKey = x509.GetECDsaPublicKey();
+
+        Assert.Equal("CN=RtcForge", x509.Subject);
+        Assert.NotNull(publicKey);
+        Assert.Equal(ECCurve.NamedCurves.nistP256.Oid.Value, publicKey!.ExportParameters(false).Curve.Oid.Value);
+        Assert.Contains(x509.Extensions.OfType<X509KeyUsageExtension>(), extension => extension.KeyUsages == X509KeyUsageFlags.DigitalSignature);
     }
 
     [Fact]

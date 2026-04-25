@@ -1,12 +1,7 @@
 using System.Security.Cryptography;
-using Org.BouncyCastle.Asn1.X509;
 using Org.BouncyCastle.Crypto;
-using Org.BouncyCastle.Crypto.Generators;
-using Org.BouncyCastle.Crypto.Operators;
-using Org.BouncyCastle.Crypto.Parameters;
-using Org.BouncyCastle.Math;
 using Org.BouncyCastle.Security;
-using Org.BouncyCastle.X509;
+using System.Security.Cryptography.X509Certificates;
 using Org.BouncyCastle.Tls.Crypto.Impl.BC;
 
 namespace RtcForge.Dtls;
@@ -28,31 +23,24 @@ public sealed class DtlsCertificate
     {
         var now = (timeProvider ?? TimeProvider.System).GetUtcNow().UtcDateTime;
         var crypto = new BcTlsCrypto(new SecureRandom());
-        var random = new SecureRandom();
-        var kpGen = new ECKeyPairGenerator();
-        kpGen.Init(new ECKeyGenerationParameters(Org.BouncyCastle.Asn1.X9.ECNamedCurveTable.GetOid("P-256"), random));
-        var kp = kpGen.GenerateKeyPair();
+        using var ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var request = new System.Security.Cryptography.X509Certificates.CertificateRequest(
+            "CN=RtcForge",
+            ecdsa,
+            HashAlgorithmName.SHA256);
+        request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, false));
+        request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, false));
+        request.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(request.PublicKey, false));
 
-        var gen = new X509V3CertificateGenerator();
-        var serialNumber = BigInteger.ProbablePrime(120, random);
-        gen.SetSerialNumber(serialNumber);
-        gen.SetSubjectDN(new X509Name("CN=RtcForge"));
-        gen.SetIssuerDN(new X509Name("CN=RtcForge"));
-        gen.SetNotBefore(now.AddDays(-1));
-        gen.SetNotAfter(now.AddYears(10));
-        gen.SetPublicKey(kp.Public);
-
-        var signatureFactory = new Asn1SignatureFactory("SHA256WithECDSA", kp.Private, random);
-        var x509Cert = gen.Generate(signatureFactory);
-
-        // Convert to Org.BouncyCastle.Tls.Certificate
-        byte[] der = x509Cert.GetEncoded();
+        using var x509Cert = request.CreateSelfSigned(now.AddDays(-1), now.AddYears(10));
+        byte[] der = x509Cert.Export(X509ContentType.Cert);
         var tlsCert = new Org.BouncyCastle.Tls.Certificate([crypto.CreateCertificate(der)]);
+        var privateKey = PrivateKeyFactory.CreateKey(ecdsa.ExportPkcs8PrivateKey());
 
         // Calculate fingerprint
         byte[] hash = SHA256.HashData(der);
         string fingerprint = BitConverter.ToString(hash).Replace("-", ":").ToUpper();
 
-        return new DtlsCertificate(tlsCert, kp.Private, fingerprint);
+        return new DtlsCertificate(tlsCert, privateKey, fingerprint);
     }
 }
