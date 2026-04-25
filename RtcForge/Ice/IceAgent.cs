@@ -1584,20 +1584,18 @@ public class IceAgent : IIceAgent
         try
         {
             var addresses = await Dns.GetHostAddressesAsync(hostname, cancellationToken).ConfigureAwait(false);
-            IPAddress? resolved;
             if (preferredFamily.HasValue)
             {
                 // Strict: a caller that asked for IPv4 must not silently receive an IPv6 address
                 // (the Socket.SendToAsync will fail with SocketException 10047). Return null so
                 // the pair is marked failed instead of throwing deep inside the send path.
-                resolved = addresses.FirstOrDefault(ip => ip.AddressFamily == preferredFamily.Value);
+                return addresses.FirstOrDefault(ip => ip.AddressFamily == preferredFamily.Value);
             }
             else
             {
-                resolved = addresses.FirstOrDefault(ip => ip.AddressFamily == AddressFamily.InterNetwork)
+                return addresses.FirstOrDefault(ip => ip.AddressFamily == AddressFamily.InterNetwork)
                     ?? addresses.FirstOrDefault();
             }
-            return resolved;
         }
         catch (SocketException)
         {
